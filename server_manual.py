@@ -30,14 +30,25 @@ def load_saved_credentials():
             creds = json.loads(creds_file.read_text())
             
             # Set environment variables from saved credentials
-            os.environ['AWS_ACCESS_KEY_ID'] = creds['access_key']
-            os.environ['AWS_SECRET_ACCESS_KEY'] = creds['secret_key']
-            if creds.get('session_token'):
-                os.environ['AWS_SESSION_TOKEN'] = creds['session_token']
-            if creds.get('region'):
-                os.environ['AWS_DEFAULT_REGION'] = creds['region']
+            # Handle both possible key formats for backwards compatibility
+            access_key = creds.get('aws_access_key_id') or creds.get('access_key')
+            secret_key = creds.get('aws_secret_access_key') or creds.get('secret_key')
+            session_token = creds.get('aws_session_token') or creds.get('session_token')
+            region = creds.get('aws_region') or creds.get('region')
+            
+            if access_key and secret_key:
+                os.environ['AWS_ACCESS_KEY_ID'] = access_key
+                os.environ['AWS_SECRET_ACCESS_KEY'] = secret_key
+                if session_token:
+                    os.environ['AWS_SESSION_TOKEN'] = session_token
+                if region:
+                    os.environ['AWS_DEFAULT_REGION'] = region
+                    
+                return True
+            else:
+                print(f"⚠️ Saved credentials missing required keys")
+                return False
                 
-            return True
         except Exception as e:
             print(f"⚠️ Could not load saved credentials: {e}")
             return False
