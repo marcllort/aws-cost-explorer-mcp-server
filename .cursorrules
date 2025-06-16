@@ -1,0 +1,378 @@
+# Autocost Controller - Cursor Rules
+
+## Project Overview
+This is a multi-cloud cost analysis and optimization platform with MCP (Model Context Protocol) integration. The project follows a modular, provider-based architecture that supports AWS, GCP, Azure, and other cloud providers.
+
+## Core Architecture Principles
+
+### 1. Provider-Based Architecture
+- Each cloud provider has its own module under `autocost_controller/providers/{provider_name}/`
+- Providers must inherit from `BaseProvider` in `autocost_controller/core/provider_manager.py`
+- All providers should implement the same interface for consistency
+
+### 2. Environment-Based Configuration
+- Use environment variables for provider selection: `AUTOCOST_PROVIDERS=aws,gcp`
+- Endpoint identification via `AUTOCOST_ENDPOINT=aws` or `unified`
+- No hardcoded credentials or provider-specific values in code
+
+### 3. MCP Tool Organization
+- Tools are organized by provider in `autocost_controller/tools/{provider}_tools.py`
+- Tool names follow the pattern: `{provider}_{category}_{action}`
+- Example: `aws_cost_explorer_analyze_costs`, `gcp_billing_get_usage`
+
+## Coding Standards
+
+### Python Style
+- Follow PEP 8 with line length of 100 characters
+- Use type hints for all function parameters and return values
+- Use docstrings for all classes, methods, and functions
+- Prefer f-strings over .format() or % formatting
+
+### Import Organization
+```python
+# Standard library imports
+import asyncio
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional
+
+# Third-party imports
+from mcp.server.fastmcp import FastMCP
+from rich.console import Console
+
+# Local imports
+from autocost_controller.core.config import Config
+from autocost_controller.core.logger import AutocostLogger
+```
+
+### Error Handling
+- Always use specific exception types when possible
+- Log errors with provider context: `logger.error("message", provider="aws")`
+- Use try-except blocks for external API calls
+- Return meaningful error messages to users
+
+### Logging Standards
+```python
+# Use the AutocostLogger with appropriate methods
+logger.info("Operation completed successfully")
+logger.provider_status("aws", "ready", "All services available")
+logger.error("Failed to connect to API", provider="aws")
+logger.cost_analysis_summary("aws", 1234.56, 7, 5)
+```
+
+## Provider Implementation Guidelines
+
+### Creating a New Provider
+
+1. **Directory Structure**
+```
+autocost_controller/providers/{provider_name}/
+├── __init__.py
+├── provider.py          # Main provider class
+├── client.py           # API client wrapper
+├── models.py           # Provider-specific data models
+└── auth.py             # Authentication handling
+```
+
+2. **Provider Class Template**
+```python
+from typing import List
+from ...core.provider_manager import BaseProvider
+from ...core.models import ProviderType, ProviderStatus
+
+class {ProviderName}Provider(BaseProvider):
+    def get_provider_name(self) -> ProviderType:
+        return "{provider_name}"
+    
+    def validate_configuration(self) -> ProviderStatus:
+        # Implement configuration validation
+        pass
+    
+    def get_capabilities(self) -> List[str]:
+        return [
+            "cost_analysis",
+            "performance_metrics", 
+            "optimization_recommendations"
+        ]
+    
+    async def test_connection(self) -> bool:
+        # Implement connection testing
+        pass
+```
+
+3. **Tool Registration Pattern**
+```python
+def register_{provider}_tools(mcp: FastMCP, provider_manager: ProviderManager, 
+                             config: Config, logger: AutocostLogger) -> None:
+    """Register {provider} cost analysis tools."""
+    
+    {provider}_provider = provider_manager.get_provider("{provider}")
+    if not {provider}_provider:
+        logger.warning("_{provider} provider not available, skipping tools registration")
+        return
+    
+    @mcp.tool()
+    async def {provider}_cost_explorer_analyze_costs(
+        days: int = 7,
+        # other parameters...
+    ) -> str:
+        """{Provider} Cost Explorer: Detailed cost analysis with breakdowns."""
+        logger.info(f"🔍 Analyzing {provider} costs for {days} days...")
+        # Implementation here
+```
+
+### Tool Naming Convention
+- Format: `{provider}_{category}_{action}`
+- Provider: `aws`, `gcp`, `azure`, `datadog`
+- Category: `cost_explorer`, `performance`, `billing`, `usage`
+- Action: `analyze_costs`, `get_insights`, `list_services`
+
+Examples:
+- ✅ `aws_cost_explorer_analyze_costs`
+- ✅ `gcp_billing_get_usage_report`
+- ✅ `azure_cost_management_optimize_resources`
+- ❌ `get_aws_costs` (wrong format)
+- ❌ `analyze_gcp_billing_data` (inconsistent)
+
+## Configuration Standards
+
+### Environment Variables
+- Use `AUTOCOST_` prefix for all project-specific variables
+- Provider lists: `AUTOCOST_PROVIDERS=aws,gcp,azure`
+- Endpoint identification: `AUTOCOST_ENDPOINT=unified`
+- Feature flags: `AUTOCOST_FEATURE_CROSS_CLOUD=true`
+
+### Config Class Usage
+```python
+config = Config()
+enabled_providers = config.enabled_providers  # From environment
+aws_region = config.aws.default_region
+log_level = config.logging.level
+```
+
+## Testing Standards
+
+### Test Structure
+- Unit tests in `tests/unit/`
+- Integration tests in `tests/integration/`
+- Provider-specific tests in `tests/providers/{provider}/`
+- Use pytest with async support
+
+### Test Naming
+```python
+def test_aws_provider_validates_configuration():
+    """Test AWS provider configuration validation."""
+
+async def test_aws_cost_analysis_returns_valid_data():
+    """Test AWS cost analysis tool returns properly formatted data."""
+```
+
+## Documentation Standards
+
+### Docstring Format
+```python
+def analyze_costs(
+    provider: str,
+    days: int = 7,
+    include_tags: bool = True
+) -> Dict[str, Any]:
+    """
+    Analyze cloud costs for specified time period.
+    
+    Args:
+        provider: Cloud provider name (aws, gcp, azure)
+        days: Number of days to analyze (default: 7)
+        include_tags: Whether to include tag-based analysis
+        
+    Returns:
+        Dict containing cost breakdown and analysis results
+        
+    Raises:
+        ProviderError: If provider is not available or configured
+        ValidationError: If parameters are invalid
+        
+    Example:
+        >>> results = analyze_costs("aws", days=30, include_tags=True)
+        >>> print(results["total_cost"])
+        1234.56
+    """
+```
+
+### README Updates
+- Keep README.md current with new features
+- Include example usage for new tools
+- Update configuration examples
+- Document new environment variables
+
+## Security Guidelines
+
+### Credential Management
+- NEVER hardcode credentials in source code
+- Use environment variables or secure credential files
+- Implement credential rotation support
+- Log authentication attempts (success/failure) without exposing secrets
+
+### API Key Handling
+```python
+# ✅ Good
+api_key = os.environ.get("GCP_API_KEY")
+if not api_key:
+    raise ConfigurationError("GCP_API_KEY environment variable required")
+
+# ❌ Bad
+api_key = "your-actual-api-key-here"
+```
+
+### Logging Security
+```python
+# ✅ Good
+logger.info(f"Authenticated to {provider} for account {account_id[:4]}****")
+
+# ❌ Bad  
+logger.info(f"Using API key: {api_key}")
+```
+
+## Performance Guidelines
+
+### Async/Await Usage
+- Use async/await for all I/O operations
+- Implement proper error handling in async functions
+- Use asyncio.gather() for concurrent operations
+
+### Caching Strategy
+```python
+# Cache expensive operations
+@lru_cache(maxsize=128, ttl=300)  # 5-minute cache
+async def get_cost_data(provider: str, date_range: str) -> Dict:
+    """Cache cost data to reduce API calls."""
+```
+
+### API Rate Limiting
+- Implement backoff strategies for API calls
+- Respect provider rate limits
+- Use connection pooling where appropriate
+
+## File Organization
+
+### Module Structure
+```
+autocost_controller/
+├── core/                    # Core functionality
+│   ├── config.py           # Configuration management
+│   ├── logger.py           # Enhanced logging
+│   ├── models.py           # Data models
+│   └── provider_manager.py # Provider lifecycle
+├── providers/              # Provider implementations
+│   ├── aws/               # AWS provider
+│   ├── gcp/               # Google Cloud provider
+│   ├── azure/             # Azure provider
+│   └── datadog/           # DataDog provider
+├── tools/                  # MCP tool implementations
+│   ├── __init__.py        # Core tools registration
+│   ├── aws_tools.py       # AWS-specific tools
+│   └── gcp_tools.py       # GCP-specific tools
+└── utils/                  # Shared utilities
+```
+
+### File Naming
+- Use snake_case for Python files: `aws_tools.py`, `provider_manager.py`
+- Use kebab-case for documentation: `setup-guide.md`, `provider-development.md`
+- Use UPPERCASE for constants files: `CONSTANTS.py`
+
+## Git Workflow
+
+### Commit Messages
+```
+feat(aws): add EC2 right-sizing recommendations
+fix(gcp): resolve billing API authentication error
+docs(readme): update provider configuration examples
+refactor(core): simplify provider initialization logic
+```
+
+### Branch Naming
+- `feature/aws-reserved-instances`
+- `fix/gcp-auth-timeout`
+- `docs/provider-development-guide`
+- `refactor/simplify-configuration`
+
+### Pull Request Guidelines
+1. Include tests for new functionality
+2. Update documentation for user-facing changes
+3. Follow the provider implementation checklist
+4. Test with multiple providers if applicable
+
+## Tools and IDE Integration
+
+### Recommended Extensions
+- Python extension with type checking
+- Black formatter
+- isort for import organization
+- Ruff for linting
+- Better docstring support
+
+### VS Code Settings
+```json
+{
+    "python.formatting.provider": "black",
+    "python.linting.enabled": true,
+    "python.linting.ruffEnabled": true,
+    "python.defaultInterpreterPath": "./.venv/bin/python"
+}
+```
+
+## Error Patterns to Avoid
+
+### Common Mistakes
+```python
+# ❌ Avoid hardcoded values
+aws_role = "arn:aws:iam::123456789012:role/CostAnalysis"
+
+# ✅ Use configuration
+aws_role = config.aws.analysis_role_arn
+
+# ❌ Avoid provider-specific logic in core
+if provider == "aws":
+    # AWS-specific code in core module
+
+# ✅ Use provider abstraction
+cost_data = await provider.get_cost_data(params)
+
+# ❌ Avoid exposing implementation details
+return {"aws_client": client, "raw_response": response}
+
+# ✅ Return clean interfaces
+return CostAnalysisResult(total=1234.56, breakdown=breakdown)
+```
+
+### Performance Anti-patterns
+```python
+# ❌ Sequential API calls
+for account in accounts:
+    costs = await get_account_costs(account)
+
+# ✅ Concurrent API calls
+cost_tasks = [get_account_costs(account) for account in accounts]
+costs = await asyncio.gather(*cost_tasks)
+```
+
+## Review Checklist
+
+Before submitting code:
+- [ ] All functions have type hints and docstrings
+- [ ] New providers follow the BaseProvider interface
+- [ ] Tool names follow the naming convention
+- [ ] Error handling includes provider context
+- [ ] Tests cover new functionality
+- [ ] Documentation is updated
+- [ ] No hardcoded credentials or secrets
+- [ ] Environment variables are documented
+- [ ] Async/await used for I/O operations
+- [ ] Logging follows the project standards
+
+## Getting Help
+
+- Check existing provider implementations for patterns
+- Refer to the BaseProvider interface for required methods
+- Use the AutocostLogger for consistent logging
+- Follow the tool registration patterns in existing files
+- Test with `python server_manual.py --test` before submitting 

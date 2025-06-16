@@ -1,0 +1,9 @@
+{
+  "endpoint_id": "aws",
+  "providers": [
+    "aws"
+  ],
+  "port": 8000,
+  "name": "Autocost Controller (AWS)",
+  "pre_run_commands": []
+}

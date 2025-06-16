@@ -1,0 +1,313 @@
+# Autocost Controller
+
+**Multi-cloud cost analysis and optimization platform with MCP (Model Context Protocol) integration.**
+
+Autocost Controller provides powerful cost analysis tools for AWS (with GCP and Azure coming soon) through a modern MCP server that integrates seamlessly with Claude Desktop and other MCP-compatible tools.
+
+## ✨ Features
+
+### 🔶 AWS Cost Explorer Integration
+- **Cost Analysis**: Detailed breakdowns by service, account, region, and time period
+- **Dimension Discovery**: Explore all available cost dimensions and filters
+- **Tag Analysis**: Analyze costs by custom tags and resource tagging strategies
+- **Performance Metrics**: EC2 performance insights with cost correlation
+- **Optimization Recommendations**: AI-powered cost optimization suggestions
+
+### 🎯 Multi-Provider Architecture
+- **Modular Design**: Enable/disable providers based on your needs
+- **Environment-Based Configuration**: Control which providers are active
+- **Unified Interface**: Consistent tool naming and behavior across providers
+
+### 🖥️ Claude Desktop Integration
+- **Multiple Configurations**: Separate endpoints for different providers
+- **Environment Variables**: Clean configuration without hardcoded values
+- **Auto-Discovery**: Automatically detects and configures Claude Desktop
+
+## 🚀 Quick Start
+
+### Prerequisites
+- Python 3.8+
+- AWS CLI configured (for AWS features)
+- Claude Desktop (optional, for GUI integration)
+
+### Installation & Setup
+
+Run the interactive setup script:
+
+```bash
+python start.py
+```
+
+This guided setup will:
+1. **Install dependencies** - All required Python packages
+2. **Configure providers** - AWS, GCP, Azure (as available)
+3. **Set up authentication** - Configurable auth methods (no hardcoded roles!)
+4. **Configure Claude Desktop** - Multiple endpoint configurations
+5. **Test everything** - Verify all components are working
+
+The setup script is fully configurable and will ask you about:
+- Which cloud providers to enable
+- Your preferred AWS authentication method (profiles, roles, environment variables)
+- Whether to configure Claude Desktop integration
+- Whether to install Cursor integration
+
+### Manual Setup (Alternative)
+
+If you prefer manual setup:
+
+1. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Configure AWS credentials** (choose one method):
+   - **AWS Profile**: `aws configure`
+   - **Environment Variables**: Set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+   - **IAM Roles**: Configure role assumption (SAML, cross-account, etc.)
+
+3. **Save credentials for Claude Desktop:**
+   ```bash
+   # After authenticating to AWS
+   python save_credentials.py
+   ```
+
+4. **Test the setup:**
+   ```bash
+   python server_manual.py --test
+   ```
+
+## 🔧 Configuration
+
+### Environment Variables
+
+Control provider configuration with environment variables:
+
+```bash
+# Enable specific providers (comma-separated)
+export AUTOCOST_PROVIDERS="aws"           # AWS only
+export AUTOCOST_PROVIDERS="aws,gcp"       # AWS + GCP (when available)
+
+# Set endpoint identifier
+export AUTOCOST_ENDPOINT="aws"            # or "unified", "gcp", etc.
+```
+
+### Claude Desktop Configurations
+
+The setup script creates multiple configurations in Claude Desktop:
+
+- **`autocost-aws`**: AWS-only cost analysis
+- **`autocost-unified`**: Multi-provider analysis (when multiple providers enabled)
+
+Each configuration is automatically optimized for its specific use case.
+
+## 🔑 Authentication
+
+### AWS Authentication Methods
+
+Autocost Controller supports multiple AWS authentication methods:
+
+#### 1. AWS Profiles
+```bash
+aws configure --profile your-profile
+export AWS_PROFILE=your-profile
+```
+
+#### 2. Environment Variables
+```bash
+export AWS_ACCESS_KEY_ID=your-access-key
+export AWS_SECRET_ACCESS_KEY=your-secret-key
+export AWS_SESSION_TOKEN=your-session-token  # if using temporary credentials
+```
+
+#### 3. Role Assumption
+For SAML, OIDC, or cross-account access:
+```bash
+# Example with saml2aws
+saml2aws login --profile your-profile
+
+# Example with AWS CLI role assumption
+aws sts assume-role --role-arn arn:aws:iam::123456789012:role/YourRole --role-session-name session
+```
+
+#### 4. Credential Saving for Claude Desktop
+After authenticating with any method:
+```bash
+python save_credentials.py
+```
+
+This securely saves your current credentials for Claude Desktop to use.
+
+### Required AWS Permissions
+
+Your AWS user/role needs these permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ce:GetCostAndUsage",
+        "ce:GetDimensionValues",
+        "ce:GetReservationCoverage",
+        "ce:GetReservationPurchaseRecommendation",
+        "ce:GetReservationUtilization",
+        "ce:GetUsageReport",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics",
+        "ec2:DescribeInstances",
+        "ec2:DescribeInstanceTypes",
+        "ec2:DescribeRegions",
+        "ecs:ListClusters",
+        "ecs:ListServices",
+        "ecs:DescribeServices",
+        "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+## 🛠️ Usage
+
+### Direct MCP Server
+
+Run the MCP server directly:
+
+```bash
+# Start server with environment-based configuration
+python server_manual.py
+
+# Test setup and credentials
+python server_manual.py --test
+
+# Show help
+python server_manual.py --help
+```
+
+### Claude Desktop Integration
+
+After running `python start.py` and configuring Claude Desktop:
+
+1. **Restart Claude Desktop**
+2. **Select your Autocost Controller endpoint** from the tools menu
+3. **Use natural language** to analyze costs:
+   - "Show me AWS costs for the last 7 days"
+   - "Which services are costing the most this month?"
+   - "Analyze costs by environment tag"
+   - "Get performance insights for EC2 instances"
+
+### Available Tools
+
+The MCP server provides these tools through Claude Desktop:
+
+#### Core Tools
+- **`get_provider_status`**: Check status of all configured providers
+
+#### AWS Cost Explorer Tools
+- **`aws_cost_explorer_discover_dimensions`**: Discover available cost dimensions
+- **`aws_cost_explorer_analyze_costs`**: Detailed cost analysis with breakdowns
+- **`aws_cost_explorer_list_tag_keys`**: List available tag keys for analysis
+- **`aws_cost_explorer_analyze_by_custom_tag`**: Analyze costs by specific tags
+
+#### AWS Performance Tools
+- **`aws_performance_ec2_insights`**: EC2 performance metrics with cost correlation
+- **`aws_performance_optimization_recommendations`**: AI-powered optimization suggestions
+
+## 📁 Project Structure
+
+```
+autocost_controller/
+├── core/                    # Core configuration and logging
+├── providers/               # Cloud provider implementations
+│   ├── aws/                # AWS provider
+│   └── manager.py          # Provider management
+├── tools/                   # MCP tool implementations
+│   ├── __init__.py         # Core tools registration
+│   ├── aws_tools.py        # AWS cost analysis tools
+│   └── aws_performance.py  # AWS performance tools
+├── server_manual.py         # MCP server (environment-aware)
+├── save_credentials.py      # Credential management utility
+├── start.py                # Interactive setup script
+└── README.md               # This file
+```
+
+## 🔒 Security
+
+- **Credentials are stored securely** with restrictive file permissions (600)
+- **No hardcoded secrets** - all authentication is configurable
+- **Environment-based configuration** - no sensitive data in code
+- **Read-only permissions** - tools only read cost/performance data
+
+## 🚨 Troubleshooting
+
+### AWS Authentication Issues
+
+1. **Check credential status:**
+   ```bash
+   python save_credentials.py --status
+   ```
+
+2. **Test AWS connectivity:**
+   ```bash
+   aws sts get-caller-identity
+   ```
+
+3. **Verify saved credentials:**
+   ```bash
+   python server_manual.py --test
+   ```
+
+### Claude Desktop Issues
+
+1. **Restart Claude Desktop** after configuration changes
+2. **Check configuration file** location:
+   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - Linux: `~/.config/claude/claude_desktop_config.json`
+   - Windows: `~/AppData/Roaming/Claude/claude_desktop_config.json`
+
+3. **Verify MCP server logs** in Claude Desktop's developer tools
+
+### Provider Status Issues
+
+```bash
+# Check which providers are ready
+python server_manual.py --test
+
+# Verify environment variables
+echo $AUTOCOST_PROVIDERS
+echo $AUTOCOST_ENDPOINT
+```
+
+## 🗺️ Roadmap
+
+- **✅ AWS Cost Explorer** - Complete with advanced analytics
+- **✅ Multi-provider architecture** - Extensible foundation
+- **🔄 GCP Cost Management** - In development
+- **🔄 Azure Cost Management** - In development
+- **🔄 Cross-cloud cost comparison** - Planned
+- **🔄 Advanced optimization recommendations** - AI-powered insights
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 💡 Support
+
+- **GitHub Issues**: Report bugs and request features
+- **Documentation**: This README and inline code documentation
+- **Setup Script**: Run `python start.py` for guided setup assistance
+
+---
+
+**Autocost Controller** - Bringing powerful cloud cost analysis to your development workflow through Claude Desktop and MCP integration.
