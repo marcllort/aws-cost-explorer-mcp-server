@@ -898,7 +898,6 @@ if __name__ == "__main__":
             endpoint_config = {
                 "endpoint_id": endpoint_id,
                 "providers": config["providers"],
-                "port": config["port"],
                 "name": config["name"],
                 "pre_run_commands": config.get("pre_run_commands", [])
             }
