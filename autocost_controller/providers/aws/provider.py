@@ -1,7 +1,8 @@
 """AWS provider implementation for Autocost Controller."""
 
 import boto3
-from typing import List, Optional
+import os
+from typing import List, Optional, Dict
 from datetime import datetime
 
 from ...core.provider_manager import BaseProvider
@@ -16,16 +17,103 @@ class AWSProvider(BaseProvider):
     def __init__(self, config: Config, logger: AutocostLogger):
         super().__init__(config, logger)
         self._clients = {}
+        self._current_profile = None
+        self._profile_sessions = {}
     
     def get_provider_name(self) -> ProviderType:
         """Return the provider name."""
         return "aws"
     
+    def set_profile(self, profile_name: Optional[str] = None) -> bool:
+        """Switch to a different AWS profile and clear client cache."""
+        try:
+            if profile_name == self._current_profile:
+                self.logger.info(f"Already using profile: {profile_name or 'default'}", "aws")
+                return True
+            
+            # Test the profile first
+            if profile_name:
+                # Check if profile exists
+                available_profiles = boto3.session.Session().available_profiles
+                if profile_name not in available_profiles:
+                    self.logger.error(f"Profile '{profile_name}' not found. Available: {available_profiles}", "aws")
+                    return False
+                
+                # Test the profile by getting caller identity
+                session = boto3.Session(profile_name=profile_name)
+                sts_client = session.client('sts')
+                identity = sts_client.get_caller_identity()
+                
+                self.logger.info(f"✅ Profile '{profile_name}' validated - Account: {identity['Account']}", "aws")
+                self._profile_sessions[profile_name] = session
+            else:
+                # Test default credentials
+                sts_client = boto3.client('sts')
+                identity = sts_client.get_caller_identity()
+                self.logger.info(f"✅ Default credentials validated - Account: {identity['Account']}", "aws")
+            
+            # Clear all cached clients when switching profiles
+            self._clients.clear()
+            self._current_profile = profile_name
+            
+            self.logger.info(f"🔄 Switched to AWS profile: {profile_name or 'default'}", "aws")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to switch to profile '{profile_name}': {str(e)}", "aws")
+            return False
+    
+    def get_current_profile(self) -> Optional[str]:
+        """Get the currently active AWS profile."""
+        return self._current_profile
+    
+    def list_available_profiles(self) -> List[str]:
+        """List all available AWS profiles."""
+        try:
+            return boto3.session.Session().available_profiles
+        except Exception as e:
+            self.logger.error(f"Error listing AWS profiles: {str(e)}", "aws")
+            return []
+    
+    def get_profile_info(self, profile_name: Optional[str] = None) -> Dict:
+        """Get information about a specific profile or current profile."""
+        try:
+            if profile_name:
+                session = boto3.Session(profile_name=profile_name)
+            else:
+                if self._current_profile:
+                    session = boto3.Session(profile_name=self._current_profile)
+                else:
+                    session = boto3.Session()
+            
+            sts_client = session.client('sts')
+            identity = sts_client.get_caller_identity()
+            
+            # Get region
+            region = session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+            
+            return {
+                'profile_name': profile_name or self._current_profile or 'default',
+                'account_id': identity['Account'],
+                'user_arn': identity['Arn'],
+                'region': region,
+                'user_id': identity['UserId']
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting profile info: {str(e)}", "aws")
+            return {}
+    
     def validate_configuration(self) -> ProviderStatus:
         """Validate AWS configuration and return status."""
         try:
             # Check AWS credentials
-            sts_client = boto3.client('sts')
+            if self._current_profile:
+                session = boto3.Session(profile_name=self._current_profile)
+                sts_client = session.client('sts')
+            else:
+                sts_client = boto3.client('sts')
+                
             identity = sts_client.get_caller_identity()
             
             capabilities = [
@@ -34,7 +122,8 @@ class AWSProvider(BaseProvider):
                 "optimization_recommendations",
                 "dimension_discovery",
                 "tag_analysis",
-                "cross_account_access"
+                "cross_account_access",
+                "profile_switching"
             ]
             
             return ProviderStatus(
@@ -76,7 +165,8 @@ class AWSProvider(BaseProvider):
             "ecs_analysis",
             "lambda_analysis",
             "rds_analysis",
-            "s3_analysis"
+            "s3_analysis",
+            "profile_switching"
         ]
     
     async def test_connection(self) -> bool:
@@ -106,19 +196,27 @@ class AWSProvider(BaseProvider):
         """Get AWS client with optional cross-account access."""
         region = region or self.config.aws_region
         
-        # Create cache key
-        cache_key = f"{service}_{account_id or 'default'}_{region}"
+        # Create cache key including current profile
+        cache_key = f"{service}_{account_id or 'default'}_{region}_{self._current_profile or 'default'}"
         
         if cache_key in self._clients:
             return self._clients[cache_key]
         
         try:
-            current_account = boto3.client('sts').get_caller_identity()['Account']
+            # Use current profile if set
+            if self._current_profile:
+                session = boto3.Session(profile_name=self._current_profile)
+                sts_client = session.client('sts')
+            else:
+                sts_client = boto3.client('sts')
+                session = boto3.Session()
+                
+            current_account = sts_client.get_caller_identity()['Account']
             
             if account_id and current_account != account_id:
-                client = self._create_cross_account_client(service, account_id, region)
+                client = self._create_cross_account_client(service, account_id, region, session)
             else:
-                client = self._create_standard_client(service, region)
+                client = self._create_standard_client(service, region, session)
             
             # Cache the client
             self._clients[cache_key] = client
@@ -128,11 +226,11 @@ class AWSProvider(BaseProvider):
             self.logger.error(f"Error creating AWS client for {service}: {e}", "aws")
             raise
     
-    def _create_cross_account_client(self, service: str, account_id: str, region: str):
+    def _create_cross_account_client(self, service: str, account_id: str, region: str, session: boto3.Session):
         """Create a client with cross-account role assumption."""
         self.logger.debug(f"Creating cross-account client for {service} in account {account_id}", "aws")
         
-        sts_client = boto3.client('sts')
+        sts_client = session.client('sts')
         role_arn = f"arn:aws:iam::{account_id}:role/{self.config.aws_cross_account_role}"
         
         self.logger.debug(f"Assuming role: {role_arn}", "aws")
@@ -155,15 +253,12 @@ class AWSProvider(BaseProvider):
         self.logger.debug(f"Successfully created cross-account client for {service}", "aws")
         return client
     
-    def _create_standard_client(self, service: str, region: str):
+    def _create_standard_client(self, service: str, region: str, session: boto3.Session):
         """Create a standard client for the current account."""
-        if self.config.aws_profile:
-            session = boto3.Session(profile_name=self.config.aws_profile)
-            client = session.client(service, region_name=region)
-        else:
-            client = boto3.client(service, region_name=region)
+        client = session.client(service, region_name=region)
         
-        current_account = boto3.client('sts').get_caller_identity()['Account']
+        sts_client = session.client('sts')
+        current_account = sts_client.get_caller_identity()['Account']
         self.logger.debug(f"Successfully created client for {service} in account {current_account}", "aws")
         
         return client 

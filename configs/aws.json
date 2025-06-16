@@ -3,7 +3,9 @@
   "providers": [
     "aws"
   ],
-  "port": 8000,
-  "name": "Autocost Controller (AWS)",
-  "pre_run_commands": []
+  "name": "autocost-aws",
+  "pre_run_commands": [
+    "assume billing_read_only.root.okta",
+    "unset AWS_SESSION_TOKEN"
+  ]
 }

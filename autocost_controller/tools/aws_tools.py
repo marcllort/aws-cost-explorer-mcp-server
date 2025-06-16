@@ -21,6 +21,342 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     
     logger.info("🔧 Registering AWS Cost Explorer tools...")
     
+    # AWS PROFILE MANAGEMENT TOOLS
+    @mcp.tool()
+    async def aws_profile_list() -> str:
+        """List all available AWS profiles configured on this system."""
+        logger.info("📋 Listing available AWS profiles...")
+        
+        try:
+            profiles = aws_provider.list_available_profiles()
+            current_profile = aws_provider.get_current_profile()
+            
+            output = ["📋 **AVAILABLE AWS PROFILES**", "=" * 40]
+            
+            if profiles:
+                output.append(f"🔧 **Total Profiles**: {len(profiles)}")
+                output.append(f"📍 **Current Profile**: {current_profile or 'default'}")
+                output.append("")
+                
+                for i, profile in enumerate(sorted(profiles), 1):
+                    marker = "👉 " if profile == current_profile else "   "
+                    output.append(f"{marker}{i}. **{profile}**")
+                    
+                    # Try to get profile info
+                    try:
+                        info = aws_provider.get_profile_info(profile)
+                        if info:
+                            output.append(f"      Account: {info.get('account_id', 'Unknown')}")
+                            output.append(f"      Region: {info.get('region', 'Unknown')}")
+                    except Exception:
+                        output.append(f"      Status: ⚠️ Error accessing profile")
+                
+                output.append(f"\n🔧 **Usage**: Use `aws_profile_switch('profile_name')` to switch profiles")
+                output.append(f"📊 **Info**: Use `aws_profile_info()` for current profile details")
+            else:
+                output.append("⚠️ No AWS profiles found")
+                output.append("💡 Configure AWS profiles using: `aws configure --profile <name>`")
+            
+            return "\n".join(output)
+            
+        except Exception as e:
+            error_msg = f"❌ Error listing AWS profiles: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    @mcp.tool()
+    async def aws_profile_switch(profile_name: str) -> str:
+        """Switch to a different AWS profile for subsequent AWS operations."""
+        logger.info(f"🔄 Switching to AWS profile: {profile_name}")
+        
+        try:
+            success = aws_provider.set_profile(profile_name)
+            
+            if success:
+                # Get profile info to show what we switched to
+                info = aws_provider.get_profile_info()
+                
+                output = ["🔄 **AWS PROFILE SWITCHED**", "=" * 40]
+                output.append(f"✅ **Successfully switched to profile**: {profile_name}")
+                
+                if info:
+                    output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
+                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                    output.append(f"👤 **User ARN**: {info.get('user_arn', 'Unknown')}")
+                
+                output.append(f"\n💡 **Note**: All subsequent AWS operations will use this profile")
+                output.append(f"🔧 **Available Tools**: EC2 insights, ECS analysis, and cost optimization")
+                output.append(f"📋 **Check Status**: Use `get_provider_status()` to verify provider capabilities")
+                
+                logger.info(f"✅ Successfully switched to AWS profile: {profile_name}")
+                return "\n".join(output)
+            else:
+                error_msg = f"❌ Failed to switch to profile '{profile_name}'. Check if profile exists and has valid credentials."
+                logger.error(error_msg)
+                return error_msg
+            
+        except Exception as e:
+            error_msg = f"❌ Error switching to profile '{profile_name}': {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    @mcp.tool()
+    async def aws_profile_info(profile_name: Optional[str] = None) -> str:
+        """Get detailed information about an AWS profile (current profile if none specified)."""
+        target_profile = profile_name or aws_provider.get_current_profile() or "default"
+        logger.info(f"ℹ️ Getting AWS profile info: {target_profile}")
+        
+        try:
+            info = aws_provider.get_profile_info(profile_name)
+            
+            if not info:
+                return f"❌ Could not get information for profile '{target_profile}'"
+            
+            output = [f"ℹ️ **AWS PROFILE INFO: {target_profile.upper()}**", "=" * 50]
+            output.append(f"👤 **Profile Name**: {info.get('profile_name', 'Unknown')}")
+            output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
+            output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+            output.append(f"🔐 **User ARN**: {info.get('user_arn', 'Unknown')}")
+            output.append(f"🆔 **User ID**: {info.get('user_id', 'Unknown')}")
+            
+            # Check if this is the current profile
+            current = aws_provider.get_current_profile()
+            if (profile_name and profile_name == current) or (not profile_name and not current):
+                output.append(f"\n✅ **Status**: Currently active profile")
+            else:
+                output.append(f"\n📍 **Status**: Available profile (not currently active)")
+            
+            # Test basic permissions
+            try:
+                if profile_name:
+                    from boto3 import Session
+                    session = Session(profile_name=profile_name)
+                    sts_client = session.client('sts')
+                else:
+                    aws_provider.get_client("sts")
+                
+                output.append(f"\n🔧 **Permissions Test**:")
+                output.append(f"   ✅ STS Access: Available")
+                
+                # Test Cost Explorer access
+                try:
+                    if profile_name:
+                        ce_client = session.client("ce")
+                    else:
+                        ce_client = aws_provider.get_client("ce")
+                    
+                    ce_client.get_dimension_values(
+                        TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
+                        Dimension='SERVICE',
+                        Context='COST_AND_USAGE',
+                        MaxResults=1
+                    )
+                    output.append(f"   ✅ Cost Explorer: Available")
+                except Exception:
+                    output.append(f"   ⚠️ Cost Explorer: Limited access")
+                
+                # Test EC2 access
+                try:
+                    if profile_name:
+                        ec2_client = session.client("ec2")
+                    else:
+                        ec2_client = aws_provider.get_client("ec2")
+                    
+                    ec2_client.describe_instances(MaxResults=1)
+                    output.append(f"   ✅ EC2 Describe: Available")
+                except Exception:
+                    output.append(f"   ❌ EC2 Describe: Permission denied")
+                
+                # Test ECS access
+                try:
+                    if profile_name:
+                        ecs_client = session.client("ecs")
+                    else:
+                        ecs_client = aws_provider.get_client("ecs")
+                    
+                    ecs_client.list_clusters(maxResults=1)
+                    output.append(f"   ✅ ECS List: Available")
+                except Exception:
+                    output.append(f"   ❌ ECS List: Permission denied")
+                
+            except Exception as e:
+                output.append(f"\n❌ **Permissions Test Failed**: {str(e)}")
+            
+            return "\n".join(output)
+            
+        except Exception as e:
+            error_msg = f"❌ Error getting profile info: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    @mcp.tool()
+    async def aws_profile_reset() -> str:
+        """Reset to default AWS credentials (no profile)."""
+        logger.info("🔄 Resetting to default AWS credentials")
+        
+        try:
+            success = aws_provider.set_profile(None)
+            
+            if success:
+                info = aws_provider.get_profile_info()
+                
+                output = ["🔄 **AWS PROFILE RESET**", "=" * 30]
+                output.append(f"✅ **Reset to default credentials**")
+                
+                if info:
+                    output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
+                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                
+                output.append(f"\n💡 **Note**: Now using default AWS credentials")
+                
+                return "\n".join(output)
+            else:
+                return "❌ Failed to reset to default credentials"
+            
+        except Exception as e:
+            error_msg = f"❌ Error resetting profile: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    # COST EXPLORER DISCOVERY TOOLS
+    @mcp.tool()
+    async def ping_server() -> str:
+        """Test server connectivity and basic AWS access."""
+        logger.info("🏓 Testing server connectivity and AWS access...")
+        
+        try:
+            output = ["🏓 **SERVER CONNECTIVITY TEST**", "=" * 40]
+            
+            # Test current profile info
+            current_profile = aws_provider.get_current_profile()
+            output.append(f"📍 **Current AWS Profile**: {current_profile or 'default'}")
+            
+            # Test AWS STS access
+            try:
+                info = aws_provider.get_profile_info()
+                if info:
+                    output.append(f"✅ **AWS STS**: Connected")
+                    output.append(f"   Account: {info.get('account_id', 'Unknown')}")
+                    output.append(f"   Region: {info.get('region', 'Unknown')}")
+                else:
+                    output.append(f"❌ **AWS STS**: No profile info available")
+            except Exception as e:
+                output.append(f"❌ **AWS STS**: {str(e)}")
+            
+            # Test Cost Explorer
+            try:
+                ce_client = aws_provider.get_client("ce")
+                ce_client.get_dimension_values(
+                    TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
+                    Dimension='SERVICE',
+                    Context='COST_AND_USAGE',
+                    MaxResults=1
+                )
+                output.append(f"✅ **Cost Explorer**: Available")
+            except Exception as e:
+                output.append(f"❌ **Cost Explorer**: {str(e)[:100]}")
+            
+            output.append(f"\n🚀 **Server Status**: Ready for AWS operations")
+            output.append(f"💡 **Use**: `aws_profile_list()` to see available profiles")
+            
+            return "\n".join(output)
+            
+        except Exception as e:
+            error_msg = f"❌ Server connectivity test failed: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    @mcp.tool()
+    async def aws_test_permissions() -> str:
+        """Test AWS permissions for various services with current profile."""
+        logger.info("🔐 Testing AWS permissions...")
+        
+        try:
+            current_profile = aws_provider.get_current_profile()
+            
+            output = ["🔐 **AWS PERMISSIONS TEST**", "=" * 40]
+            output.append(f"📍 **Profile**: {current_profile or 'default'}")
+            
+            # Get basic profile info
+            try:
+                info = aws_provider.get_profile_info()
+                if info:
+                    output.append(f"📊 **Account**: {info.get('account_id', 'Unknown')}")
+                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+            except Exception:
+                pass
+            
+            output.append(f"\n🔧 **Service Permissions**:")
+            
+            # Test STS (should always work)
+            try:
+                aws_provider.get_client("sts")
+                output.append(f"   ✅ **STS**: Available")
+            except Exception as e:
+                output.append(f"   ❌ **STS**: {str(e)[:50]}")
+            
+            # Test Cost Explorer
+            try:
+                ce_client = aws_provider.get_client("ce")
+                ce_client.get_dimension_values(
+                    TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
+                    Dimension='SERVICE',
+                    Context='COST_AND_USAGE',
+                    MaxResults=1
+                )
+                output.append(f"   ✅ **Cost Explorer**: Full access")
+            except Exception as e:
+                if "AccessDenied" in str(e):
+                    output.append(f"   ❌ **Cost Explorer**: Access denied")
+                else:
+                    output.append(f"   ⚠️ **Cost Explorer**: {str(e)[:50]}")
+            
+            # Test EC2 
+            try:
+                ec2_client = aws_provider.get_client("ec2")
+                ec2_client.describe_instances(MaxResults=1)
+                output.append(f"   ✅ **EC2**: Describe instances available")
+            except Exception as e:
+                if "UnauthorizedOperation" in str(e):
+                    output.append(f"   ❌ **EC2**: Unauthorized operation")
+                else:
+                    output.append(f"   ⚠️ **EC2**: {str(e)[:50]}")
+            
+            # Test CloudWatch
+            try:
+                cw_client = aws_provider.get_client("cloudwatch")
+                cw_client.list_metrics(MaxRecords=1)
+                output.append(f"   ✅ **CloudWatch**: Metrics available")
+            except Exception as e:
+                if "AccessDenied" in str(e):
+                    output.append(f"   ❌ **CloudWatch**: Access denied")
+                else:
+                    output.append(f"   ⚠️ **CloudWatch**: {str(e)[:50]}")
+            
+            # Test ECS
+            try:
+                ecs_client = aws_provider.get_client("ecs")
+                ecs_client.list_clusters(maxResults=1)
+                output.append(f"   ✅ **ECS**: List clusters available")
+            except Exception as e:
+                if "AccessDenied" in str(e):
+                    output.append(f"   ❌ **ECS**: Access denied")
+                else:
+                    output.append(f"   ⚠️ **ECS**: {str(e)[:50]}")
+            
+            output.append(f"\n💡 **Next Steps**:")
+            output.append(f"   • ✅ permissions = Service fully available")
+            output.append(f"   • ❌ permissions = Need additional IAM policies") 
+            output.append(f"   • Use `aws_profile_switch('profile')` to try different profile")
+            output.append(f"   • Use `aws_profile_list()` to see available profiles")
+            
+            return "\n".join(output)
+            
+        except Exception as e:
+            error_msg = f"❌ Error testing permissions: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
     @mcp.tool()
     async def aws_cost_explorer_discover_dimensions(
         days: int = 7,
@@ -182,100 +518,214 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_cost_explorer_analyze_by_dimension(
         dimension: str,
-        group_by_dimensions: Optional[List[str]] = None,
         days: int = 7,
         account_id: Optional[str] = None,
         region: Optional[str] = None,
-        services: Optional[List[str]] = None,
         top_n: int = 10
     ) -> str:
-        """AWS Cost Explorer: Analyze costs by any dimension with optional grouping and filtering."""
+        """AWS Cost Explorer: Analyze costs by any dimension with detailed breakdown."""
+        import asyncio
+        
         logger.info(f"📊 Analyzing costs by dimension: {dimension}")
         
         try:
-            ce_client = aws_provider.get_client("ce", account_id, region)
-            
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
-            
-            # Build group by clause
-            group_by = [{'Type': 'DIMENSION', 'Key': dimension}]
-            if group_by_dimensions:
-                for dim in group_by_dimensions:
-                    group_by.append({'Type': 'DIMENSION', 'Key': dim})
-            
-            # Build filter if services specified
-            filter_expr = None
-            if services:
-                filter_expr = {
-                    'Dimensions': {
-                        'Key': 'SERVICE',
-                        'Values': services,
-                        'MatchOptions': ['EQUALS']
-                    }
-                }
-            
-            response = ce_client.get_cost_and_usage(
-                TimePeriod={
-                    'Start': start_date.strftime('%Y-%m-%d'),
-                    'End': end_date.strftime('%Y-%m-%d')
-                },
-                Granularity='DAILY',
-                Metrics=['BlendedCost', 'UnblendedCost', 'UsageQuantity'],
-                GroupBy=group_by,
-                Filter=filter_expr
-            )
-            
-            # Process results
-            dimension_costs = {}
-            total_cost = 0.0
-            
-            for result in response.get('ResultsByTime', []):
-                for group in result.get('Groups', []):
-                    keys = group.get('Keys', [])
-                    if keys:
-                        key = ' | '.join(keys)
-                        cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
-                        
-                        if key not in dimension_costs:
-                            dimension_costs[key] = 0.0
-                        dimension_costs[key] += cost
-                        total_cost += cost
-            
-            # Sort by cost
-            sorted_costs = sorted(dimension_costs.items(), key=lambda x: x[1], reverse=True)
-            
-            output = [f"📊 **COST ANALYSIS BY {dimension.upper()}**", "=" * 60]
-            output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
-            output.append(f"💰 **Total Cost**: ${total_cost:.2f}")
-            output.append(f"📈 **Daily Average**: ${total_cost/days:.2f}")
-            
-            if services:
-                output.append(f"🔍 **Filtered by Services**: {', '.join(services)}")
-            
-            if group_by_dimensions:
-                output.append(f"📋 **Grouped by**: {dimension} + {', '.join(group_by_dimensions)}")
-            
-            output.append(f"\n🏆 **TOP {min(top_n, len(sorted_costs))} BY COST**:")
-            
-            for i, (key, cost) in enumerate(sorted_costs[:top_n], 1):
-                percentage = (cost / total_cost * 100) if total_cost > 0 else 0
-                daily_avg = cost / days
+            async def analyze_dimension_with_timeout():
+                logger.info(f"🔍 Connecting to AWS Cost Explorer...")
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                logger.info(f"✅ Connected to AWS Cost Explorer")
                 
-                output.append(f"{i:2d}. **{key}**")
-                output.append(f"     💰 ${cost:.2f} ({percentage:.1f}%)")
-                output.append(f"     📈 ${daily_avg:.2f}/day")
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                logger.info(f"📅 Querying period: {start_date} to {end_date}")
+                
+                # Build group by clause (simplified - just the main dimension)
+                group_by = [{'Type': 'DIMENSION', 'Key': dimension}]
+                
+                logger.info(f"🔄 Making API call for dimension analysis...")
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost', 'UnblendedCost'],
+                    GroupBy=group_by
+                )
+                logger.info(f"✅ API call completed successfully")
+                
+                # Process results
+                dimension_costs = {}
+                total_cost = 0.0
+                
+                logger.info(f"🔄 Processing results...")
+                for result in response.get('ResultsByTime', []):
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if keys:
+                            key = keys[0]  # Simplified - just use the first key
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            if key not in dimension_costs:
+                                dimension_costs[key] = 0.0
+                            dimension_costs[key] += cost
+                            total_cost += cost
+                
+                # Sort by cost
+                sorted_costs = sorted(dimension_costs.items(), key=lambda x: x[1], reverse=True)
+                logger.info(f"📊 Found {len(sorted_costs)} dimension values with total cost: ${total_cost:.2f}")
+                
+                output = [f"📊 **COST ANALYSIS BY {dimension.upper()}**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"💰 **Total Cost**: ${total_cost:.2f}")
+                output.append(f"📈 **Daily Average**: ${total_cost/days:.2f}")
+                output.append(f"🔍 **Dimension Values Found**: {len(sorted_costs)}")
+                
+                output.append(f"\n🏆 **TOP {min(top_n, len(sorted_costs))} BY COST**:")
+                
+                for i, (key, cost) in enumerate(sorted_costs[:top_n], 1):
+                    percentage = (cost / total_cost * 100) if total_cost > 0 else 0
+                    daily_avg = cost / days
+                    
+                    output.append(f"{i:2d}. **{key}**")
+                    output.append(f"     💰 ${cost:.2f} ({percentage:.1f}%)")
+                    output.append(f"     📈 ${daily_avg:.2f}/day")
+                
+                if len(sorted_costs) > top_n:
+                    remaining_cost = sum(cost for _, cost in sorted_costs[top_n:])
+                    remaining_percentage = (remaining_cost / total_cost * 100) if total_cost > 0 else 0
+                    output.append(f"\n📊 **Others**: ${remaining_cost:.2f} ({remaining_percentage:.1f}%)")
+                
+                return "\n".join(output)
             
-            if len(sorted_costs) > top_n:
-                remaining_cost = sum(cost for _, cost in sorted_costs[top_n:])
-                remaining_percentage = (remaining_cost / total_cost * 100) if total_cost > 0 else 0
-                output.append(f"\n📊 **Others**: ${remaining_cost:.2f} ({remaining_percentage:.1f}%)")
+            # Use timeout to prevent hanging (45 seconds for this complex operation)
+            result = await asyncio.wait_for(analyze_dimension_with_timeout(), timeout=45.0)
+            logger.info(f"✅ Successfully completed dimension analysis")
+            return result
             
-            return "\n".join(output)
-            
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS dimension analysis for '{dimension}' took longer than 45 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
-            logger.error(f"Error analyzing by dimension: {str(e)}")
-            return f"❌ Error analyzing by dimension: {str(e)}"
+            error_msg = f"❌ Error analyzing by dimension: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
+    
+    @mcp.tool()
+    async def aws_cost_explorer_analyze_by_service(
+        days: int = 7,
+        account_id: Optional[str] = None,
+        region: Optional[str] = None,
+        top_n: int = 15
+    ) -> str:
+        """AWS Cost Explorer: Analyze costs by AWS service - simplified version for quick service breakdown."""
+        import asyncio
+        
+        logger.info(f"🔧 Analyzing costs by AWS service for {days} days...")
+        
+        try:
+            async def analyze_service_with_timeout():
+                logger.info(f"🔍 Connecting to AWS Cost Explorer...")
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                logger.info(f"✅ Connected to AWS Cost Explorer")
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                logger.info(f"📅 Querying period: {start_date} to {end_date}")
+                
+                logger.info(f"🔄 Making API call for service analysis...")
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost', 'UnblendedCost'],
+                    GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
+                )
+                logger.info(f"✅ API call completed successfully")
+                
+                # Process results
+                service_costs = {}
+                total_cost = 0.0
+                
+                logger.info(f"🔄 Processing results...")
+                for result in response.get('ResultsByTime', []):
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if keys:
+                            service = keys[0]
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            if service not in service_costs:
+                                service_costs[service] = 0.0
+                            service_costs[service] += cost
+                            total_cost += cost
+                
+                # Sort by cost
+                sorted_services = sorted(service_costs.items(), key=lambda x: x[1], reverse=True)
+                logger.info(f"🔧 Found {len(sorted_services)} services with total cost: ${total_cost:.2f}")
+                
+                output = [f"🔧 **AWS SERVICE COST ANALYSIS**", "=" * 50]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"💰 **Total Cost**: ${total_cost:.2f}")
+                output.append(f"📈 **Daily Average**: ${total_cost/days:.2f}")
+                output.append(f"🔧 **Services Found**: {len(sorted_services)}")
+                
+                output.append(f"\n🏆 **TOP {min(top_n, len(sorted_services))} SERVICES BY COST**:")
+                
+                for i, (service, cost) in enumerate(sorted_services[:top_n], 1):
+                    percentage = (cost / total_cost * 100) if total_cost > 0 else 0
+                    daily_avg = cost / days
+                    
+                    # Simplify service names for better readability
+                    service_name = service
+                    if service.startswith('Amazon '):
+                        service_name = service[7:]  # Remove 'Amazon ' prefix
+                    elif service.startswith('AWS '):
+                        service_name = service[4:]   # Remove 'AWS ' prefix
+                    
+                    output.append(f"{i:2d}. **{service_name}**")
+                    output.append(f"     💰 ${cost:.2f} ({percentage:.1f}%)")
+                    output.append(f"     📈 ${daily_avg:.2f}/day")
+                
+                if len(sorted_services) > top_n:
+                    remaining_cost = sum(cost for _, cost in sorted_services[top_n:])
+                    remaining_percentage = (remaining_cost / total_cost * 100) if total_cost > 0 else 0
+                    output.append(f"\n📊 **Other Services**: ${remaining_cost:.2f} ({remaining_percentage:.1f}%)")
+                
+                # Add quick optimization tips
+                top_service = sorted_services[0] if sorted_services else None
+                if top_service:
+                    service_name, service_cost = top_service
+                    output.append(f"\n💡 **Quick Tips**:")
+                    
+                    if 'Elastic Compute Cloud' in service_name and service_cost > 50:
+                        output.append("   • EC2: Consider Reserved Instances or Spot instances")
+                    elif 'Simple Storage Service' in service_name and service_cost > 20:
+                        output.append("   • S3: Review storage classes and lifecycle policies")
+                    elif 'Relational Database Service' in service_name and service_cost > 30:
+                        output.append("   • RDS: Consider Reserved Instances for steady workloads")
+                    elif 'Lambda' in service_name:
+                        output.append("   • Lambda: Monitor memory allocation and execution time")
+                    
+                    output.append("   • Use aws_cost_explorer_analyze_by_dimension('SERVICE') for detailed breakdown")
+                
+                return "\n".join(output)
+            
+            # Use timeout to prevent hanging (30 seconds)
+            result = await asyncio.wait_for(analyze_service_with_timeout(), timeout=30.0)
+            logger.info(f"✅ Successfully completed service analysis")
+            return result
+            
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS service analysis took longer than 30 seconds"
+            logger.error(error_msg)
+            return error_msg
+        except Exception as e:
+            error_msg = f"❌ Error analyzing by service: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
     
     # TAG ANALYSIS TOOLS
     @mcp.tool()
@@ -286,75 +736,147 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
         max_results: int = 100
     ) -> str:
         """AWS Cost Explorer: List all available tag keys for cost analysis."""
+        import asyncio
+        
         logger.info(f"🏷️ Listing AWS tag keys for {days} days...")
         
         try:
-            ce_client = aws_provider.get_client("ce", account_id, region)
-            
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
-            
-            response = ce_client.get_dimension_values(
-                TimePeriod={
-                    'Start': start_date.strftime('%Y-%m-%d'),
-                    'End': end_date.strftime('%Y-%m-%d')
-                },
-                Dimension='TAG_KEY',
-                Context='COST_AND_USAGE',
-                MaxResults=max_results
-            )
-            
-            tag_keys = [item['Value'] for item in response.get('DimensionValues', [])]
-            total_count = response.get('TotalSize', 0)
-            
-            output = ["🏷️ **AVAILABLE TAG KEYS**", "=" * 40]
-            output.append(f"📊 **Total Tag Keys**: {total_count}")
-            output.append(f"📅 **Period**: {start_date} to {end_date}")
-            
-            if tag_keys:
-                output.append(f"\n🔍 **Tag Keys** (showing {len(tag_keys)} of {total_count}):")
+            async def list_tag_keys_with_timeout():
+                logger.info(f"🔍 Connecting to AWS Cost Explorer...")
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                logger.info(f"✅ Connected to AWS Cost Explorer")
                 
-                # Group common tag patterns
-                aws_tags = [key for key in tag_keys if key.startswith('aws:')]
-                name_tags = [key for key in tag_keys if 'name' in key.lower()]
-                env_tags = [key for key in tag_keys if any(env in key.lower() for env in ['env', 'environment', 'stage'])]
-                cost_tags = [key for key in tag_keys if any(cost in key.lower() for cost in ['cost', 'billing', 'budget'])]
-                other_tags = [key for key in tag_keys if key not in aws_tags + name_tags + env_tags + cost_tags]
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                logger.info(f"📅 Querying period: {start_date} to {end_date}")
                 
-                if name_tags:
-                    output.append(f"\n📛 **Name Tags** ({len(name_tags)}):")
-                    for tag in sorted(name_tags)[:10]:
-                        output.append(f"   • {tag}")
+                # Try different contexts to avoid API validation errors
+                contexts_to_try = ['COST_AND_USAGE', 'RESERVATIONS', 'SAVINGS_PLANS']
+                tag_keys = []
+                total_count = 0
+                successful_context = None
                 
-                if env_tags:
-                    output.append(f"\n🌍 **Environment Tags** ({len(env_tags)}):")
-                    for tag in sorted(env_tags)[:10]:
-                        output.append(f"   • {tag}")
+                for context in contexts_to_try:
+                    try:
+                        logger.info(f"🔄 Trying context: {context}")
+                        response = ce_client.get_dimension_values(
+                            TimePeriod={
+                                'Start': start_date.strftime('%Y-%m-%d'),
+                                'End': end_date.strftime('%Y-%m-%d')
+                            },
+                            Dimension='TAG_KEY',
+                            Context=context,
+                            MaxResults=max_results
+                        )
+                        
+                        tag_keys = [item['Value'] for item in response.get('DimensionValues', [])]
+                        total_count = response.get('TotalSize', 0)
+                        successful_context = context
+                        logger.info(f"✅ Successfully retrieved {len(tag_keys)} tag keys using context: {context}")
+                        break
+                        
+                    except Exception as e:
+                        logger.warning(f"⚠️ Context {context} failed: {str(e)[:100]}")
+                        continue
                 
-                if cost_tags:
-                    output.append(f"\n💰 **Cost/Billing Tags** ({len(cost_tags)}):")
-                    for tag in sorted(cost_tags)[:10]:
-                        output.append(f"   • {tag}")
+                if not tag_keys and not successful_context:
+                    # If all contexts fail, try a simpler approach using cost and usage API
+                    logger.info(f"🔄 Trying alternative approach via cost and usage query...")
+                    try:
+                        response = ce_client.get_cost_and_usage(
+                            TimePeriod={
+                                'Start': start_date.strftime('%Y-%m-%d'),
+                                'End': end_date.strftime('%Y-%m-%d')
+                            },
+                            Granularity='DAILY',
+                            Metrics=['BlendedCost'],
+                            GroupBy=[{'Type': 'TAG', 'Key': '*'}]
+                        )
+                        
+                        # Extract unique tag keys from the response
+                        tag_keys_set = set()
+                        for result in response.get('ResultsByTime', []):
+                            for group in result.get('Groups', []):
+                                keys = group.get('Keys', [])
+                                if keys:
+                                    # Tag keys are in format "tag_key$tag_value"
+                                    for key in keys:
+                                        if '$' in key:
+                                            tag_key = key.split('$')[0]
+                                            tag_keys_set.add(tag_key)
+                        
+                        tag_keys = sorted(list(tag_keys_set))
+                        total_count = len(tag_keys)
+                        successful_context = "COST_AND_USAGE_QUERY"
+                        logger.info(f"✅ Alternative approach found {len(tag_keys)} tag keys")
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Alternative approach also failed: {str(e)}")
+                        return f"❌ Unable to retrieve tag keys: All approaches failed. This might indicate no tagged resources in the time period or insufficient permissions."
                 
-                if aws_tags:
-                    output.append(f"\n☁️ **AWS System Tags** ({len(aws_tags)}):")
-                    for tag in sorted(aws_tags)[:5]:
-                        output.append(f"   • {tag}")
+                output = ["🏷️ **AVAILABLE TAG KEYS**", "=" * 40]
+                output.append(f"📊 **Total Tag Keys**: {total_count}")
+                output.append(f"📅 **Period**: {start_date} to {end_date}")
+                output.append(f"🔧 **Context Used**: {successful_context}")
                 
-                if other_tags:
-                    output.append(f"\n📋 **Other Tags** ({len(other_tags)}):")
-                    for tag in sorted(other_tags)[:10]:
-                        output.append(f"   • {tag}")
+                if tag_keys:
+                    output.append(f"\n🔍 **Tag Keys** (showing {len(tag_keys)} of {total_count}):")
+                    
+                    # Group common tag patterns
+                    aws_tags = [key for key in tag_keys if key.startswith('aws:')]
+                    name_tags = [key for key in tag_keys if 'name' in key.lower()]
+                    env_tags = [key for key in tag_keys if any(env in key.lower() for env in ['env', 'environment', 'stage'])]
+                    cost_tags = [key for key in tag_keys if any(cost in key.lower() for cost in ['cost', 'billing', 'budget'])]
+                    other_tags = [key for key in tag_keys if key not in aws_tags + name_tags + env_tags + cost_tags]
+                    
+                    if name_tags:
+                        output.append(f"\n📛 **Name Tags** ({len(name_tags)}):")
+                        for tag in sorted(name_tags)[:10]:
+                            output.append(f"   • {tag}")
+                    
+                    if env_tags:
+                        output.append(f"\n🌍 **Environment Tags** ({len(env_tags)}):")
+                        for tag in sorted(env_tags)[:10]:
+                            output.append(f"   • {tag}")
+                    
+                    if cost_tags:
+                        output.append(f"\n💰 **Cost/Billing Tags** ({len(cost_tags)}):")
+                        for tag in sorted(cost_tags)[:10]:
+                            output.append(f"   • {tag}")
+                    
+                    if aws_tags:
+                        output.append(f"\n☁️ **AWS System Tags** ({len(aws_tags)}):")
+                        for tag in sorted(aws_tags)[:5]:
+                            output.append(f"   • {tag}")
+                    
+                    if other_tags:
+                        output.append(f"\n📋 **Other Tags** ({len(other_tags)}):")
+                        for tag in sorted(other_tags)[:10]:
+                            output.append(f"   • {tag}")
+                    
+                    output.append(f"\n🔧 **Usage**: Use `aws_cost_explorer_analyze_by_custom_tag('tag_key')` to analyze costs by any tag")
+                else:
+                    output.append("\n⚠️ No tag keys found in the specified time period")
+                    output.append("💡 This could mean:")
+                    output.append("   • No resources have tags in this time period")
+                    output.append("   • Resources were created outside the specified date range")
+                    output.append("   • Try increasing the 'days' parameter")
                 
-                output.append(f"\n🔧 **Usage**: Use `aws_cost_explorer_analyze_by_tag('tag_key')` to analyze costs by any tag")
-            else:
-                output.append("\n⚠️ No tag keys found in the specified time period")
+                return "\n".join(output)
             
-            return "\n".join(output)
+            # Use timeout to prevent hanging (30 seconds)
+            result = await asyncio.wait_for(list_tag_keys_with_timeout(), timeout=30.0)
+            logger.info(f"✅ Successfully completed tag keys listing")
+            return result
             
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS tag keys listing took longer than 30 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
-            logger.error(f"Error listing tag keys: {str(e)}")
-            return f"❌ Error listing tag keys: {str(e)}"
+            error_msg = f"❌ Error listing tag keys: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
 
     @mcp.tool()
     async def aws_cost_explorer_analyze_by_name_tag(

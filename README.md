@@ -199,22 +199,70 @@ After running `python start.py` and configuring Claude Desktop:
    - "Analyze costs by environment tag"
    - "Get performance insights for EC2 instances"
 
+### AWS Profile Switching
+
+**New Feature**: Switch between AWS profiles dynamically to access different permission levels.
+
+#### Why Use Profile Switching?
+- **EC2/ECS Insights**: Performance insights require broader permissions (EC2:DescribeInstances, CloudWatch, etc.)
+- **Cross-Account Analysis**: Switch between profiles for different AWS accounts
+- **Role-Based Access**: Use different profiles for different permission levels
+
+#### Quick Commands
+```bash
+# List available profiles
+aws_profile_list()
+
+# Switch to admin profile for enhanced insights
+aws_profile_switch('admin-profile')
+
+# Test current permissions
+aws_test_permissions()
+
+# Get EC2 performance insights (requires enhanced permissions)
+aws_performance_ec2_insights(days=7)
+
+# Switch back to limited profile
+aws_profile_reset()
+```
+
+#### Typical Workflow
+1. Start with basic cost analysis (limited permissions)
+2. Check available profiles: `aws_profile_list()`
+3. Switch to admin profile: `aws_profile_switch('admin-profile')`
+4. Run enhanced analysis: `aws_performance_ec2_insights()`
+5. Switch back: `aws_profile_reset()`
+
+See **[AWS_PROFILE_SWITCHING.md](AWS_PROFILE_SWITCHING.md)** for detailed guide.
+
 ### Available Tools
 
 The MCP server provides these tools through Claude Desktop:
 
 #### Core Tools
 - **`get_provider_status`**: Check status of all configured providers
+- **`ping_server`**: Test server connectivity and basic AWS access
+
+#### AWS Profile Management
+- **`aws_profile_list`**: List all available AWS profiles
+- **`aws_profile_switch`**: Switch to a different AWS profile  
+- **`aws_profile_info`**: Get detailed information about a profile
+- **`aws_profile_reset`**: Reset to default AWS credentials
+- **`aws_test_permissions`**: Test current profile's AWS service permissions
 
 #### AWS Cost Explorer Tools
 - **`aws_cost_explorer_discover_dimensions`**: Discover available cost dimensions
-- **`aws_cost_explorer_analyze_costs`**: Detailed cost analysis with breakdowns
+- **`aws_cost_explorer_analyze_by_service`**: Quick service cost breakdown
+- **`aws_cost_explorer_analyze_by_dimension`**: Analyze costs by any dimension
 - **`aws_cost_explorer_list_tag_keys`**: List available tag keys for analysis
 - **`aws_cost_explorer_analyze_by_custom_tag`**: Analyze costs by specific tags
+- **`aws_cost_explorer_analyze_by_name_tag`**: Analyze costs by Name tag values
+- **`aws_cost_explorer_analyze_specific_resource`**: Detailed analysis for a specific resource
 
 #### AWS Performance Tools
-- **`aws_performance_ec2_insights`**: EC2 performance metrics with cost correlation
-- **`aws_performance_optimization_recommendations`**: AI-powered optimization suggestions
+- **`aws_performance_ec2_insights`**: EC2 performance metrics with cost correlation *(requires enhanced permissions)*
+- **`get_ecs_performance_insights`**: ECS performance analysis *(requires enhanced permissions)*  
+- **`get_cost_optimization_recommendations`**: AI-powered optimization suggestions
 
 ## 📁 Project Structure
 

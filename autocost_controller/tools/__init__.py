@@ -124,6 +124,20 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
             output.append(f"\n{emoji} **{provider_name.upper()}**: {status.status}")
             output.append(f"   Configured: {'Yes' if status.is_configured else 'No'}")
             
+            # Add AWS profile information if AWS provider is ready
+            if provider_name == "aws" and status.status == "ready":
+                aws_provider = provider_manager.get_provider("aws")
+                if aws_provider:
+                    current_profile = aws_provider.get_current_profile()
+                    try:
+                        profile_info = aws_provider.get_profile_info()
+                        output.append(f"   Profile: {current_profile or 'default'}")
+                        if profile_info:
+                            output.append(f"   Account: {profile_info.get('account_id', 'Unknown')}")
+                            output.append(f"   Region: {profile_info.get('region', 'Unknown')}")
+                    except Exception:
+                        output.append(f"   Profile: {current_profile or 'default'} (info unavailable)")
+            
             if status.capabilities:
                 output.append(f"   Capabilities: {', '.join(status.capabilities)}")
             
@@ -139,6 +153,14 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
         ready_count = len([s for s in filtered_statuses.values() if s.status == "ready"])
         
         output.append(f"\n📊 **SUMMARY**: {ready_count}/{len(filtered_statuses)} providers ready")
+        
+        # Add quick usage tips
+        if ready_count > 0:
+            output.append(f"\n💡 **QUICK TIPS**:")
+            if any(k == "aws" and v.status == "ready" for k, v in filtered_statuses.items()):
+                output.append(f"   • AWS: Use `aws_profile_list()` to see profiles")
+                output.append(f"   • AWS: Use `aws_test_permissions()` to check access")
+                output.append(f"   • AWS: Use `aws_cost_explorer_analyze_by_service()` for cost analysis")
         
         return "\n".join(output)
 
