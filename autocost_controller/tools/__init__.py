@@ -57,6 +57,35 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
     """Register core multi-provider tools."""
     
     @mcp.tool()
+    async def ping_server() -> str:
+        """Quick ping test to verify server connectivity and responsiveness."""
+        import asyncio
+        from datetime import datetime
+        
+        logger.info("🏓 Ping test requested")
+        
+        start_time = datetime.now()
+        
+        # Simulate a quick async operation
+        await asyncio.sleep(0.1)
+        
+        end_time = datetime.now()
+        duration_ms = (end_time - start_time).total_seconds() * 1000
+        
+        response = [
+            "🏓 **PING RESPONSE**",
+            "=" * 30,
+            f"⏰ Response time: {duration_ms:.1f}ms",
+            f"📅 Server time: {end_time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"🚀 Status: Server is responsive",
+            "",
+            "✅ Connection test successful!"
+        ]
+        
+        logger.info(f"🏓 Ping completed in {duration_ms:.1f}ms")
+        return "\n".join(response)
+    
+    @mcp.tool()
     async def get_provider_status() -> str:
         """Get status of all configured cloud providers."""
         logger.info("📋 Getting provider status...")
