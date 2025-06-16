@@ -89,6 +89,10 @@ export AUTOCOST_PROVIDERS="aws,gcp"       # AWS + GCP (when available)
 
 # Set endpoint identifier
 export AUTOCOST_ENDPOINT="aws"            # or "unified", "gcp", etc.
+
+# Enable/disable custom company-specific tools (default: true)
+export AUTOCOST_ENABLE_CUSTOM_TOOLS="true"   # Enable advanced cost analysis tools
+export AUTOCOST_ENABLE_CUSTOM_TOOLS="false"  # Disable custom tools (basic tools only)
 ```
 
 ### Claude Desktop Configurations

@@ -17,9 +17,7 @@ from mcp.server.fastmcp import FastMCP
 from autocost_controller.core.config import Config
 from autocost_controller.core.logger import AutocostLogger
 from autocost_controller.core.provider_manager import ProviderManager
-from autocost_controller.tools import register_core_tools
-from autocost_controller.tools.aws_tools import register_aws_tools
-from autocost_controller.tools.aws_performance import register_aws_performance_tools
+from autocost_controller.tools import register_all_tools
 
 def load_saved_credentials():
     """Load saved AWS credentials if available."""
@@ -136,19 +134,8 @@ def main():
     # Initialize provider manager
     provider_manager = ProviderManager(config, logger)
     
-    # Register core tools (always available)
-    register_core_tools(mcp, provider_manager, config, logger)
-    
-    # Register provider-specific tools based on enabled providers
-    if "aws" in enabled_providers:
-        register_aws_tools(mcp, provider_manager, config, logger)
-        register_aws_performance_tools(mcp, provider_manager, config, logger)
-    
-    # Add more providers here as they become available
-    # if "gcp" in enabled_providers:
-    #     register_gcp_tools(mcp, provider_manager, config, logger)
-    # if "azure" in enabled_providers:
-    #     register_azure_tools(mcp, provider_manager, config, logger)
+    # Register all tools (includes core tools and provider-specific tools)
+    register_all_tools(mcp, provider_manager, config, logger)
     
     logger.info(f"🎯 MCP Server ready with {len(enabled_providers)} provider(s)")
     

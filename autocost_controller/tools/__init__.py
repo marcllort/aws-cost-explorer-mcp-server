@@ -180,16 +180,16 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     # Import and register AWS tools
     from .aws_tools import register_aws_tools as register_aws_cost_tools
     from .aws_performance import register_aws_performance_tools
-    from .aws_cost_analysis import register_aws_cost_analysis_tools
+    from .custom import register_custom_tools
     
-    # Register cost analysis tools
+    # Register basic cost analysis tools
     register_aws_cost_tools(mcp, provider_manager, config, logger)
-    
-    # Register advanced cost analysis tools
-    register_aws_cost_analysis_tools(mcp, provider_manager, config, logger)
     
     # Register performance and optimization tools
     register_aws_performance_tools(mcp, provider_manager, config, logger)
+    
+    # Register custom company-specific tools (can be disabled via env var)
+    register_custom_tools(mcp, provider_manager, config, logger)
 
 
 def register_gcp_tools(mcp: FastMCP, provider_manager: ProviderManager, config: Config, logger: AutocostLogger) -> None:

@@ -157,7 +157,7 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                 end_date = datetime.now().date()
                 start_date = end_date - timedelta(days=days)
                 
-                # Get ECS costs broken down by usage type
+                # Get ECS costs broken down by usage type (focuses on ECS-specific costs only)
                 response = ce_client.get_cost_and_usage(
                     TimePeriod={
                         'Start': start_date.strftime('%Y-%m-%d'),
@@ -166,8 +166,7 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     Granularity='DAILY',
                     Metrics=['BlendedCost', 'UsageQuantity'],
                     GroupBy=[
-                        {'Type': 'DIMENSION', 'Key': 'USAGE_TYPE'},
-                        {'Type': 'DIMENSION', 'Key': 'OPERATION'}
+                        {'Type': 'DIMENSION', 'Key': 'USAGE_TYPE'}
                     ],
                     Filter={
                         'Dimensions': {
@@ -178,25 +177,50 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     }
                 )
                 
-                # Process ECS cost breakdown
+                # Get ECS costs by tenant/organization for proper attribution
+                tenant_response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {'Type': 'TAG', 'Key': 'Organization'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon Elastic Container Service'],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Process ECS cost breakdown by usage type
                 fargate_costs = {}
                 ec2_costs = {}
                 container_insights_costs = 0.0
                 total_ecs_cost = 0.0
+                usage_type_breakdown = {}
                 
                 for result in response.get('ResultsByTime', []):
                     date = result['TimePeriod']['Start']
                     
                     for group in result.get('Groups', []):
                         keys = group.get('Keys', [])
-                        if len(keys) >= 2:
+                        if len(keys) >= 1:
                             usage_type = keys[0]
-                            operation = keys[1]
                             cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
                             
                             total_ecs_cost += cost
                             
-                            # Categorize costs
+                            # Track usage type breakdown
+                            if usage_type not in usage_type_breakdown:
+                                usage_type_breakdown[usage_type] = 0.0
+                            usage_type_breakdown[usage_type] += cost
+                            
+                            # Categorize costs by ECS type
                             if 'Fargate' in usage_type:
                                 if date not in fargate_costs:
                                     fargate_costs[date] = 0.0
@@ -208,6 +232,19 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                             elif 'ContainerInsights' in usage_type:
                                 container_insights_costs += cost
                 
+                # Process ECS tenant attribution
+                tenant_costs = {}
+                for result in tenant_response.get('ResultsByTime', []):
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 1:
+                            tenant = keys[0] if keys[0] != 'No tag' else 'Untagged'
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            if tenant not in tenant_costs:
+                                tenant_costs[tenant] = 0.0
+                            tenant_costs[tenant] += cost
+                
                 # Calculate daily averages
                 fargate_daily_avg = sum(fargate_costs.values()) / days if fargate_costs else 0
                 ec2_daily_avg = sum(ec2_costs.values()) / days if ec2_costs else 0
@@ -218,7 +255,16 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                 output.append(f"💰 **Total ECS Cost**: ${total_ecs_cost:.2f}")
                 output.append(f"📈 **Daily Average**: ${total_ecs_cost/days:.2f}")
                 
-                output.append(f"\n🔧 **COST BREAKDOWN**:")
+                output.append(f"\n🔧 **ECS USAGE TYPE BREAKDOWN**:")
+                sorted_usage_types = sorted(usage_type_breakdown.items(), key=lambda x: x[1], reverse=True)
+                for usage_type, cost in sorted_usage_types[:10]:
+                    percentage = (cost / total_ecs_cost * 100) if total_ecs_cost > 0 else 0
+                    daily_avg = cost / days
+                    # Clean up usage type names for readability
+                    clean_name = usage_type.replace('ECS-Fargate-', '').replace('ECS-EC2-', '').replace('USW2-', '')
+                    output.append(f"   • **{clean_name}**: ${cost:.2f} ({percentage:.1f}%) - ${daily_avg:.2f}/day")
+                
+                output.append(f"\n🚀 **COMPUTE TYPE BREAKDOWN**:")
                 output.append(f"   🚀 **Fargate**: ${sum(fargate_costs.values()):.2f} (${fargate_daily_avg:.2f}/day)")
                 output.append(f"   🖥️ **EC2**: ${sum(ec2_costs.values()):.2f} (${ec2_daily_avg:.2f}/day)")
                 output.append(f"   📊 **Container Insights**: ${container_insights_costs:.2f} (${insights_daily_avg:.2f}/day)")
@@ -232,6 +278,15 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     output.append(f"\n📊 **COMPUTE SPLIT**:")
                     output.append(f"   🚀 Fargate: {fargate_ratio:.1f}%")
                     output.append(f"   🖥️ EC2: {ec2_ratio:.1f}%")
+                
+                # Show ECS tenant attribution
+                if tenant_costs:
+                    sorted_tenants = sorted(tenant_costs.items(), key=lambda x: x[1], reverse=True)
+                    output.append(f"\n🏢 **ECS COSTS BY ORGANIZATION** (Top 10):")
+                    for i, (tenant, cost) in enumerate(sorted_tenants[:10], 1):
+                        percentage = (cost / total_ecs_cost * 100) if total_ecs_cost > 0 else 0
+                        daily_avg = cost / days
+                        output.append(f"{i:2d}. **{tenant}**: ${cost:.2f} ({percentage:.1f}%) - ${daily_avg:.2f}/day")
                 
                 # Analyze Container Insights impact
                 if insights_daily_avg > 50:  # If significant Container Insights cost
@@ -255,12 +310,21 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     rightsizing_savings = total_compute * 0.15 / days
                     output.append(f"   📏 **Right-sizing**: ~${rightsizing_savings:.2f}/day potential (15%)")
                 
+                untagged_cost = tenant_costs.get('Untagged', 0)
+                if untagged_cost > total_ecs_cost * 0.1:
+                    output.append(f"   🏷️ **Tagging**: ${untagged_cost:.2f} untagged ECS costs need organization tags")
+                
                 # Show daily cost trend
                 if len(fargate_costs) >= 7:
-                    output.append(f"\n📈 **DAILY COST TREND** (Fargate):")
-                    sorted_dates = sorted(fargate_costs.keys())[-7:]
+                    output.append(f"\n📈 **DAILY ECS COST TREND**:")
+                    all_daily_costs = {}
+                    for date in fargate_costs:
+                        all_daily_costs[date] = fargate_costs.get(date, 0) + ec2_costs.get(date, 0)
+                    
+                    sorted_dates = sorted(all_daily_costs.keys())[-7:]
                     for date in sorted_dates:
-                        output.append(f"   {date}: ${fargate_costs.get(date, 0):.2f}")
+                        total_day_cost = all_daily_costs.get(date, 0)
+                        output.append(f"   {date}: ${total_day_cost:.2f}")
                 
                 return "\n".join(output)
             
@@ -582,7 +646,7 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
     
     @mcp.tool()
     async def aws_tenant_cost_analysis(
-        tag_key: str = "TenantId",
+        tag_key: str = "Organization",
         days: int = 7,
         top_n: int = 20,
         cost_threshold: float = 100.0,
@@ -601,7 +665,7 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                 end_date = datetime.now().date()
                 start_date = end_date - timedelta(days=days)
                 
-                # Get costs by tenant tag and service
+                # Get costs by tenant tag (primary grouping)
                 response = ce_client.get_cost_and_usage(
                     TimePeriod={
                         'Start': start_date.strftime('%Y-%m-%d'),
@@ -610,14 +674,12 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     Granularity='DAILY',
                     Metrics=['BlendedCost'],
                     GroupBy=[
-                        {'Type': 'TAG', 'Key': tag_key},
-                        {'Type': 'DIMENSION', 'Key': 'SERVICE'}
+                        {'Type': 'TAG', 'Key': tag_key}
                     ]
                 )
                 
                 # Process tenant costs
                 tenant_costs = {}
-                tenant_services = {}
                 daily_tenant_costs = {}
                 
                 for result in response.get('ResultsByTime', []):
@@ -625,28 +687,64 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     
                     for group in result.get('Groups', []):
                         keys = group.get('Keys', [])
-                        if len(keys) >= 2:
+                        if len(keys) >= 1:
                             tenant = keys[0] if keys[0] != 'No tag' else 'Untagged'
-                            service = keys[1]
                             cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
                             
                             # Total tenant costs
                             if tenant not in tenant_costs:
                                 tenant_costs[tenant] = 0.0
-                                tenant_services[tenant] = {}
                                 daily_tenant_costs[tenant] = {}
                             
                             tenant_costs[tenant] += cost
-                            
-                            # Service breakdown per tenant
-                            if service not in tenant_services[tenant]:
-                                tenant_services[tenant][service] = 0.0
-                            tenant_services[tenant][service] += cost
                             
                             # Daily costs per tenant
                             if date not in daily_tenant_costs[tenant]:
                                 daily_tenant_costs[tenant][date] = 0.0
                             daily_tenant_costs[tenant][date] += cost
+                
+                # Get service breakdown for top tenants
+                top_tenants = sorted(tenant_costs.items(), key=lambda x: x[1], reverse=True)[:5]
+                tenant_services = {}
+                
+                if top_tenants:
+                    # Get service breakdown for top tenants
+                    for tenant, _ in top_tenants:
+                        if tenant != 'Untagged':
+                            try:
+                                service_response = ce_client.get_cost_and_usage(
+                                    TimePeriod={
+                                        'Start': start_date.strftime('%Y-%m-%d'),
+                                        'End': end_date.strftime('%Y-%m-%d')
+                                    },
+                                    Granularity='DAILY',
+                                    Metrics=['BlendedCost'],
+                                    GroupBy=[
+                                        {'Type': 'DIMENSION', 'Key': 'SERVICE'}
+                                    ],
+                                    Filter={
+                                        'Tags': {
+                                            'Key': tag_key,
+                                            'Values': [tenant],
+                                            'MatchOptions': ['EQUALS']
+                                        }
+                                    }
+                                )
+                                
+                                tenant_services[tenant] = {}
+                                for svc_result in service_response.get('ResultsByTime', []):
+                                    for svc_group in svc_result.get('Groups', []):
+                                        svc_keys = svc_group.get('Keys', [])
+                                        if len(svc_keys) >= 1:
+                                            service = svc_keys[0]
+                                            svc_cost = float(svc_group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                                            
+                                            if service not in tenant_services[tenant]:
+                                                tenant_services[tenant][service] = 0.0
+                                            tenant_services[tenant][service] += svc_cost
+                            except Exception as e:
+                                logger.warning(f"Could not get service breakdown for {tenant}: {e}")
+                                tenant_services[tenant] = {}
                 
                 # Sort tenants by cost
                 sorted_tenants = sorted(tenant_costs.items(), key=lambda x: x[1], reverse=True)
@@ -672,13 +770,15 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     output.append(f"     💰 ${cost:.2f} ({percentage:.1f}%)")
                     output.append(f"     📈 ${daily_avg:.2f}/day, ${monthly_projection:.2f}/month")
                     
-                    # Show top services for this tenant
-                    services = sorted(tenant_services[tenant].items(), key=lambda x: x[1], reverse=True)[:3]
-                    service_summary = []
-                    for svc, svc_cost in services:
-                        svc_name = svc.replace('Amazon ', '').replace('AWS ', '')[:15]
-                        service_summary.append(f"{svc_name} ${svc_cost:.0f}")
-                    output.append(f"     🔧 Top: {', '.join(service_summary)}")
+                    # Show top services for this tenant if available
+                    if tenant in tenant_services and tenant_services[tenant]:
+                        services = sorted(tenant_services[tenant].items(), key=lambda x: x[1], reverse=True)[:3]
+                        service_summary = []
+                        for svc, svc_cost in services:
+                            svc_name = svc.replace('Amazon ', '').replace('AWS ', '')[:15]
+                            service_summary.append(f"{svc_name} ${svc_cost:.0f}")
+                        if service_summary:
+                            output.append(f"     🔧 Top: {', '.join(service_summary)}")
                 
                 # Identify cost anomalies
                 anomalous_tenants = []
@@ -686,11 +786,11 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                     daily_avg = cost / days
                     if daily_avg > cost_threshold:
                         # Check if this is unusually high
-                        tenant_daily_costs = list(daily_tenant_costs[tenant].values())
-                        if len(tenant_daily_costs) >= 3:
-                            recent_avg = sum(tenant_daily_costs[-3:]) / 3
-                            if len(tenant_daily_costs) >= 6:
-                                historical_avg = sum(tenant_daily_costs[:-3]) / (len(tenant_daily_costs) - 3)
+                        tenant_daily_costs_list = list(daily_tenant_costs[tenant].values())
+                        if len(tenant_daily_costs_list) >= 3:
+                            recent_avg = sum(tenant_daily_costs_list[-3:]) / 3
+                            if len(tenant_daily_costs_list) >= 6:
+                                historical_avg = sum(tenant_daily_costs_list[:-3]) / (len(tenant_daily_costs_list) - 3)
                                 if recent_avg > historical_avg * 1.5:  # 50% increase
                                     anomalous_tenants.append((tenant, recent_avg, historical_avg))
                 
@@ -721,6 +821,20 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
                         output.append(f"   Expensive UAT tenants:")
                         for tenant, cost in expensive_uat[:5]:
                             output.append(f"     • {tenant}: ${cost:.2f}")
+                
+                # Organization-specific patterns (your company's patterns)
+                problem_patterns = ['H11', 'A28', 'U14', 'D32', 'E17']
+                pattern_tenants = []
+                for pattern in problem_patterns:
+                    matching = [(t, c) for t, c in sorted_tenants if pattern in t.upper()]
+                    if matching:
+                        pattern_tenants.extend(matching)
+                
+                if pattern_tenants:
+                    output.append(f"\n🎯 **KNOWN PROBLEM PATTERNS**:")
+                    for tenant, cost in pattern_tenants[:10]:
+                        daily_cost = cost / days
+                        output.append(f"   • {tenant}: ${cost:.2f} (${daily_cost:.2f}/day)")
                 
                 # Optimization recommendations
                 output.append(f"\n💡 **OPTIMIZATION RECOMMENDATIONS**:")
@@ -926,4 +1040,177 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
         except asyncio.TimeoutError:
             return f"⏰ Timeout: Redshift cost analysis took longer than 45 seconds"
         except Exception as e:
-            return f"❌ Error analyzing Redshift costs: {str(e)}" 
+            return f"❌ Error analyzing Redshift costs: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_service_tenant_cost_analysis(
+        service_name: str,
+        tag_key: str = "Organization", 
+        days: int = 7,
+        top_n: int = 15,
+        cost_threshold: float = 50.0,
+        account_id: Optional[str] = None,
+        region: Optional[str] = None
+    ) -> str:
+        """AWS Service-Specific Tenant Analysis: Analyze costs by tenant/organization for a specific AWS service."""
+        import asyncio
+        
+        logger.info(f"🏢 Analyzing {service_name} costs by {tag_key} for {days} days...")
+        
+        try:
+            async def analyze_service_tenant_costs_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                
+                # Get costs by tenant tag for the specific service
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {'Type': 'TAG', 'Key': tag_key}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': [service_name],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Process tenant costs for this service
+                tenant_costs = {}
+                daily_tenant_costs = {}
+                
+                for result in response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 1:
+                            tenant = keys[0] if keys[0] != 'No tag' else 'Untagged'
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            # Total tenant costs
+                            if tenant not in tenant_costs:
+                                tenant_costs[tenant] = 0.0
+                                daily_tenant_costs[tenant] = {}
+                            
+                            tenant_costs[tenant] += cost
+                            
+                            # Daily costs per tenant
+                            if date not in daily_tenant_costs[tenant]:
+                                daily_tenant_costs[tenant][date] = 0.0
+                            daily_tenant_costs[tenant][date] += cost
+                
+                # Sort tenants by cost
+                sorted_tenants = sorted(tenant_costs.items(), key=lambda x: x[1], reverse=True)
+                total_cost = sum(tenant_costs.values())
+                
+                output = [f"🏢 **{service_name.upper()} COSTS BY {tag_key.upper()}**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"💰 **Total {service_name} Cost**: ${total_cost:.2f}")
+                output.append(f"📈 **Daily Average**: ${total_cost/days:.2f}")
+                output.append(f"🏢 **Total Tenants**: {len(sorted_tenants)}")
+                
+                # Show top tenants
+                output.append(f"\n🏆 **TOP {min(top_n, len(sorted_tenants))} TENANTS BY COST**:")
+                
+                for i, (tenant, cost) in enumerate(sorted_tenants[:top_n], 1):
+                    percentage = (cost / total_cost * 100) if total_cost > 0 else 0
+                    daily_avg = cost / days
+                    monthly_projection = daily_avg * 30
+                    
+                    # Highlight expensive tenants
+                    cost_emoji = "🔴" if cost > cost_threshold * 4 else "🟠" if cost > cost_threshold else "🟢"
+                    
+                    output.append(f"\n{i:2d}. {cost_emoji} **{tenant}**")
+                    output.append(f"     💰 ${cost:.2f} ({percentage:.1f}%)")
+                    output.append(f"     📈 ${daily_avg:.2f}/day, ${monthly_projection:.2f}/month")
+                
+                # Identify cost anomalies for this service
+                anomalous_tenants = []
+                for tenant, cost in sorted_tenants:
+                    daily_avg = cost / days
+                    if daily_avg > cost_threshold/2:  # Lower threshold for service-specific analysis
+                        # Check if this is unusually high
+                        tenant_daily_costs_list = list(daily_tenant_costs[tenant].values())
+                        if len(tenant_daily_costs_list) >= 3:
+                            recent_avg = sum(tenant_daily_costs_list[-3:]) / 3
+                            if len(tenant_daily_costs_list) >= 6:
+                                historical_avg = sum(tenant_daily_costs_list[:-3]) / (len(tenant_daily_costs_list) - 3)
+                                if recent_avg > historical_avg * 1.3:  # 30% increase for service-specific
+                                    anomalous_tenants.append((tenant, recent_avg, historical_avg))
+                
+                if anomalous_tenants:
+                    output.append(f"\n🚨 **{service_name.upper()} COST ANOMALIES**:")
+                    for tenant, recent, historical in anomalous_tenants[:5]:
+                        increase = ((recent - historical) / historical * 100)
+                        output.append(f"   ⚠️ **{tenant}**: {increase:+.1f}% increase")
+                        output.append(f"      Recent: ${recent:.2f}/day vs Historical: ${historical:.2f}/day")
+                
+                # Show tenants above threshold
+                expensive_tenants = [(t, c) for t, c in sorted_tenants if c > cost_threshold]
+                if expensive_tenants:
+                    output.append(f"\n💸 **TENANTS ABOVE ${cost_threshold:.0f} THRESHOLD**:")
+                    for tenant, cost in expensive_tenants[:10]:
+                        daily_cost = cost / days
+                        output.append(f"   • {tenant}: ${cost:.2f} (${daily_cost:.2f}/day)")
+                
+                # UAT/Test environment analysis for this service
+                uat_tenants = [(t, c) for t, c in sorted_tenants if any(env in t.upper() for env in ['UAT', 'TEST', 'DEV', 'STAGING'])]
+                if uat_tenants:
+                    total_uat_cost = sum(c for _, c in uat_tenants)
+                    output.append(f"\n🧪 **{service_name.upper()} UAT/TEST ENVIRONMENTS**:")
+                    output.append(f"   Total UAT cost: ${total_uat_cost:.2f} ({total_uat_cost/total_cost*100:.1f}%)")
+                    
+                    expensive_uat = [(t, c) for t, c in uat_tenants if c > cost_threshold/3]
+                    if expensive_uat:
+                        output.append(f"   Expensive UAT tenants:")
+                        for tenant, cost in expensive_uat[:5]:
+                            daily_cost = cost / days
+                            output.append(f"     • {tenant}: ${cost:.2f} (${daily_cost:.2f}/day)")
+                
+                # Show daily trend for top tenant
+                if sorted_tenants and len(daily_tenant_costs[sorted_tenants[0][0]]) >= 5:
+                    top_tenant = sorted_tenants[0][0]
+                    output.append(f"\n📈 **DAILY TREND - {top_tenant}**:")
+                    tenant_daily = daily_tenant_costs[top_tenant]
+                    sorted_dates = sorted(tenant_daily.keys())[-7:]
+                    for date in sorted_dates:
+                        cost = tenant_daily.get(date, 0)
+                        output.append(f"   {date}: ${cost:.2f}")
+                
+                # Service-specific recommendations
+                output.append(f"\n💡 **{service_name.upper()} OPTIMIZATION RECOMMENDATIONS**:")
+                
+                untagged_cost = tenant_costs.get('Untagged', 0)
+                if untagged_cost > total_cost * 0.05:
+                    output.append(f"   🏷️ ${untagged_cost:.2f} untagged {service_name} costs need organization tags")
+                
+                if len(expensive_tenants) > 0:
+                    output.append(f"   🎯 Review top {len(expensive_tenants)} tenants above ${cost_threshold:.0f} threshold")
+                
+                if anomalous_tenants:
+                    output.append(f"   🚨 Investigate {len(anomalous_tenants)} tenants with recent cost increases")
+                
+                if uat_tenants and total_uat_cost > total_cost * 0.2:
+                    output.append(f"   🧪 UAT costs are {total_uat_cost/total_cost*100:.1f}% of {service_name} total - review necessity")
+                
+                output.append(f"   📊 Set up {service_name}-specific cost alerts for tenant monitoring")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_service_tenant_costs_with_timeout(), timeout=45.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: {service_name} tenant analysis took longer than 45 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing {service_name} tenant costs: {str(e)}" 
