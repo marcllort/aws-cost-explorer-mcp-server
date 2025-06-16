@@ -63,6 +63,10 @@ class AutocostSetup:
         self.config_data = {}
         self.provider_endpoints = {}
         
+    def get_python_executable(self) -> str:
+        """Get the path to the current Python executable."""
+        return sys.executable
+
     def show_banner(self):
         """Display the enhanced startup banner."""
         banner_text = """
