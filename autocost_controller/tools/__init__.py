@@ -130,11 +130,19 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
                 if aws_provider:
                     current_profile = aws_provider.get_current_profile()
                     try:
-                        profile_info = aws_provider.get_profile_info()
+                        # Use fast profile info to avoid timeouts in provider status
+                        profile_info = aws_provider.get_profile_info_fast()
                         output.append(f"   Profile: {current_profile or 'default'}")
                         if profile_info:
-                            output.append(f"   Account: {profile_info.get('account_id', 'Unknown')}")
                             output.append(f"   Region: {profile_info.get('region', 'Unknown')}")
+                            # Only show account if we have full info (not just fast info)
+                            try:
+                                full_info = aws_provider.get_profile_info()
+                                if full_info and full_info.get('account_id') and 'timeout' not in full_info.get('account_id', ''):
+                                    output.append(f"   Account: {full_info.get('account_id', 'Unknown')}")
+                            except Exception:
+                                # If full info fails, just skip account info
+                                pass
                     except Exception:
                         output.append(f"   Profile: {current_profile or 'default'} (info unavailable)")
             

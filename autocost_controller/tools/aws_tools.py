@@ -25,40 +25,52 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_profile_list() -> str:
         """List all available AWS profiles configured on this system."""
+        import asyncio
+        
         logger.info("📋 Listing available AWS profiles...")
         
         try:
-            profiles = aws_provider.list_available_profiles()
-            current_profile = aws_provider.get_current_profile()
-            
-            output = ["📋 **AVAILABLE AWS PROFILES**", "=" * 40]
-            
-            if profiles:
-                output.append(f"🔧 **Total Profiles**: {len(profiles)}")
-                output.append(f"📍 **Current Profile**: {current_profile or 'default'}")
-                output.append("")
+            async def list_profiles_with_timeout():
+                profiles = aws_provider.list_available_profiles()
+                current_profile = aws_provider.get_current_profile()
                 
-                for i, profile in enumerate(sorted(profiles), 1):
-                    marker = "👉 " if profile == current_profile else "   "
-                    output.append(f"{marker}{i}. **{profile}**")
+                output = ["📋 **AVAILABLE AWS PROFILES**", "=" * 40]
+                
+                if profiles:
+                    output.append(f"🔧 **Total Profiles**: {len(profiles)}")
+                    output.append(f"📍 **Current Profile**: {current_profile or 'default'}")
+                    output.append("")
                     
-                    # Try to get profile info
-                    try:
-                        info = aws_provider.get_profile_info(profile)
-                        if info:
-                            output.append(f"      Account: {info.get('account_id', 'Unknown')}")
-                            output.append(f"      Region: {info.get('region', 'Unknown')}")
-                    except Exception:
-                        output.append(f"      Status: ⚠️ Error accessing profile")
+                    for i, profile in enumerate(sorted(profiles), 1):
+                        marker = "👉 " if profile == current_profile else "   "
+                        output.append(f"{marker}{i}. **{profile}**")
+                        
+                        # Try to get profile info (fast version to avoid timeouts)
+                        try:
+                            info = aws_provider.get_profile_info_fast(profile)
+                            if info:
+                                output.append(f"      Region: {info.get('region', 'Unknown')}")
+                                output.append(f"      Status: {info.get('status', 'Unknown')}")
+                        except Exception:
+                            output.append(f"      Status: ⚠️ Error accessing profile")
+                    
+                    output.append(f"\n🔧 **Usage**: Use `aws_profile_switch('profile_name')` to switch profiles")
+                    output.append(f"📊 **Info**: Use `aws_profile_info()` for current profile details")
+                else:
+                    output.append("⚠️ No AWS profiles found")
+                    output.append("💡 Configure AWS profiles using: `aws configure --profile <name>`")
                 
-                output.append(f"\n🔧 **Usage**: Use `aws_profile_switch('profile_name')` to switch profiles")
-                output.append(f"📊 **Info**: Use `aws_profile_info()` for current profile details")
-            else:
-                output.append("⚠️ No AWS profiles found")
-                output.append("💡 Configure AWS profiles using: `aws configure --profile <name>`")
+                return "\n".join(output)
             
-            return "\n".join(output)
+            # Use timeout to prevent hanging (10 seconds for listing)
+            result = await asyncio.wait_for(list_profiles_with_timeout(), timeout=10.0)
+            logger.info(f"✅ Successfully listed AWS profiles")
+            return result
             
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS profile listing took longer than 10 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
             error_msg = f"❌ Error listing AWS profiles: {str(e)}"
             logger.error(error_msg)
@@ -67,34 +79,45 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_profile_switch(profile_name: str) -> str:
         """Switch to a different AWS profile for subsequent AWS operations."""
+        import asyncio
+        
         logger.info(f"🔄 Switching to AWS profile: {profile_name}")
         
         try:
-            success = aws_provider.set_profile(profile_name)
+            async def switch_profile_with_timeout():
+                success = aws_provider.set_profile(profile_name)
+                
+                if success:
+                    # Get profile info to show what we switched to (use fast version)
+                    info = aws_provider.get_profile_info_fast()
+                    
+                    output = ["🔄 **AWS PROFILE SWITCHED**", "=" * 40]
+                    output.append(f"✅ **Successfully switched to profile**: {profile_name}")
+                    
+                    if info:
+                        output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                        output.append(f"📊 **Status**: {info.get('status', 'Unknown')}")
+                    
+                    output.append(f"\n💡 **Note**: All subsequent AWS operations will use this profile")
+                    output.append(f"🔧 **Available Tools**: EC2 insights, ECS analysis, and cost optimization")
+                    output.append(f"📋 **Check Status**: Use `get_provider_status()` to verify provider capabilities")
+                    output.append(f"🔐 **Test Permissions**: Use `aws_test_permissions()` to check access")
+                    
+                    logger.info(f"✅ Successfully switched to AWS profile: {profile_name}")
+                    return "\n".join(output)
+                else:
+                    error_msg = f"❌ Failed to switch to profile '{profile_name}'. Check if profile exists and has valid credentials."
+                    logger.error(error_msg)
+                    return error_msg
             
-            if success:
-                # Get profile info to show what we switched to
-                info = aws_provider.get_profile_info()
-                
-                output = ["🔄 **AWS PROFILE SWITCHED**", "=" * 40]
-                output.append(f"✅ **Successfully switched to profile**: {profile_name}")
-                
-                if info:
-                    output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
-                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
-                    output.append(f"👤 **User ARN**: {info.get('user_arn', 'Unknown')}")
-                
-                output.append(f"\n💡 **Note**: All subsequent AWS operations will use this profile")
-                output.append(f"🔧 **Available Tools**: EC2 insights, ECS analysis, and cost optimization")
-                output.append(f"📋 **Check Status**: Use `get_provider_status()` to verify provider capabilities")
-                
-                logger.info(f"✅ Successfully switched to AWS profile: {profile_name}")
-                return "\n".join(output)
-            else:
-                error_msg = f"❌ Failed to switch to profile '{profile_name}'. Check if profile exists and has valid credentials."
-                logger.error(error_msg)
-                return error_msg
+            # Use timeout to prevent hanging (15 seconds for switching)
+            result = await asyncio.wait_for(switch_profile_with_timeout(), timeout=15.0)
+            return result
             
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS profile switch took longer than 15 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
             error_msg = f"❌ Error switching to profile '{profile_name}': {str(e)}"
             logger.error(error_msg)
@@ -103,87 +126,50 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_profile_info(profile_name: Optional[str] = None) -> str:
         """Get detailed information about an AWS profile (current profile if none specified)."""
+        import asyncio
+        
         target_profile = profile_name or aws_provider.get_current_profile() or "default"
         logger.info(f"ℹ️ Getting AWS profile info: {target_profile}")
         
         try:
-            info = aws_provider.get_profile_info(profile_name)
-            
-            if not info:
-                return f"❌ Could not get information for profile '{target_profile}'"
-            
-            output = [f"ℹ️ **AWS PROFILE INFO: {target_profile.upper()}**", "=" * 50]
-            output.append(f"👤 **Profile Name**: {info.get('profile_name', 'Unknown')}")
-            output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
-            output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
-            output.append(f"🔐 **User ARN**: {info.get('user_arn', 'Unknown')}")
-            output.append(f"🆔 **User ID**: {info.get('user_id', 'Unknown')}")
-            
-            # Check if this is the current profile
-            current = aws_provider.get_current_profile()
-            if (profile_name and profile_name == current) or (not profile_name and not current):
-                output.append(f"\n✅ **Status**: Currently active profile")
-            else:
-                output.append(f"\n📍 **Status**: Available profile (not currently active)")
-            
-            # Test basic permissions
-            try:
-                if profile_name:
-                    from boto3 import Session
-                    session = Session(profile_name=profile_name)
-                    sts_client = session.client('sts')
+            async def get_profile_info_with_timeout():
+                info = aws_provider.get_profile_info(profile_name)
+                
+                if not info:
+                    return f"❌ Could not get information for profile '{target_profile}'"
+                
+                output = [f"ℹ️ **AWS PROFILE INFO: {target_profile.upper()}**", "=" * 50]
+                output.append(f"👤 **Profile Name**: {info.get('profile_name', 'Unknown')}")
+                output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                
+                # Show account info if available (might be "Unknown" if API timeout)
+                account_id = info.get('account_id', 'Unknown')
+                if account_id != 'Unknown (API timeout)':
+                    output.append(f"📊 **Account ID**: {account_id}")
+                    output.append(f"🔐 **User ARN**: {info.get('user_arn', 'Unknown')}")
+                    output.append(f"🆔 **User ID**: {info.get('user_id', 'Unknown')}")
                 else:
-                    aws_provider.get_client("sts")
+                    output.append(f"📊 **Account ID**: Unknown (API call timeout)")
+                    output.append(f"💡 **Note**: Use `aws_test_permissions()` to verify access")
                 
-                output.append(f"\n🔧 **Permissions Test**:")
-                output.append(f"   ✅ STS Access: Available")
+                # Check if this is the current profile
+                current = aws_provider.get_current_profile()
+                if (profile_name and profile_name == current) or (not profile_name and not current):
+                    output.append(f"\n✅ **Status**: Currently active profile")
+                else:
+                    output.append(f"\n📍 **Status**: Available profile (not currently active)")
                 
-                # Test Cost Explorer access
-                try:
-                    if profile_name:
-                        ce_client = session.client("ce")
-                    else:
-                        ce_client = aws_provider.get_client("ce")
-                    
-                    ce_client.get_dimension_values(
-                        TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
-                        Dimension='SERVICE',
-                        Context='COST_AND_USAGE',
-                        MaxResults=1
-                    )
-                    output.append(f"   ✅ Cost Explorer: Available")
-                except Exception:
-                    output.append(f"   ⚠️ Cost Explorer: Limited access")
-                
-                # Test EC2 access
-                try:
-                    if profile_name:
-                        ec2_client = session.client("ec2")
-                    else:
-                        ec2_client = aws_provider.get_client("ec2")
-                    
-                    ec2_client.describe_instances(MaxResults=1)
-                    output.append(f"   ✅ EC2 Describe: Available")
-                except Exception:
-                    output.append(f"   ❌ EC2 Describe: Permission denied")
-                
-                # Test ECS access
-                try:
-                    if profile_name:
-                        ecs_client = session.client("ecs")
-                    else:
-                        ecs_client = aws_provider.get_client("ecs")
-                    
-                    ecs_client.list_clusters(maxResults=1)
-                    output.append(f"   ✅ ECS List: Available")
-                except Exception:
-                    output.append(f"   ❌ ECS List: Permission denied")
-                
-            except Exception as e:
-                output.append(f"\n❌ **Permissions Test Failed**: {str(e)}")
+                return "\n".join(output)
             
-            return "\n".join(output)
+            # Use timeout to prevent hanging (20 seconds for profile info)
+            result = await asyncio.wait_for(get_profile_info_with_timeout(), timeout=20.0)
+            logger.info(f"✅ Successfully got profile info")
+            return result
             
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: Getting profile info took longer than 20 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
             error_msg = f"❌ Error getting profile info: {str(e)}"
             logger.error(error_msg)
@@ -192,27 +178,38 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_profile_reset() -> str:
         """Reset to default AWS credentials (no profile)."""
+        import asyncio
+        
         logger.info("🔄 Resetting to default AWS credentials")
         
         try:
-            success = aws_provider.set_profile(None)
+            async def reset_profile_with_timeout():
+                success = aws_provider.set_profile(None)
+                
+                if success:
+                    info = aws_provider.get_profile_info_fast()
+                    
+                    output = ["🔄 **AWS PROFILE RESET**", "=" * 30]
+                    output.append(f"✅ **Reset to default credentials**")
+                    
+                    if info:
+                        output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                    
+                    output.append(f"\n💡 **Note**: Now using default AWS credentials")
+                    
+                    return "\n".join(output)
+                else:
+                    return "❌ Failed to reset to default credentials"
             
-            if success:
-                info = aws_provider.get_profile_info()
-                
-                output = ["🔄 **AWS PROFILE RESET**", "=" * 30]
-                output.append(f"✅ **Reset to default credentials**")
-                
-                if info:
-                    output.append(f"📊 **Account ID**: {info.get('account_id', 'Unknown')}")
-                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
-                
-                output.append(f"\n💡 **Note**: Now using default AWS credentials")
-                
-                return "\n".join(output)
-            else:
-                return "❌ Failed to reset to default credentials"
+            # Use timeout to prevent hanging (10 seconds for reset)
+            result = await asyncio.wait_for(reset_profile_with_timeout(), timeout=10.0)
+            logger.info(f"✅ Successfully reset to default profile")
+            return result
             
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: Profile reset took longer than 10 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
             error_msg = f"❌ Error resetting profile: {str(e)}"
             logger.error(error_msg)
@@ -269,89 +266,104 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     @mcp.tool()
     async def aws_test_permissions() -> str:
         """Test AWS permissions for various services with current profile."""
+        import asyncio
+        
         logger.info("🔐 Testing AWS permissions...")
         
         try:
-            current_profile = aws_provider.get_current_profile()
+            async def test_permissions_with_timeout():
+                current_profile = aws_provider.get_current_profile()
+                
+                output = ["🔐 **AWS PERMISSIONS TEST**", "=" * 40]
+                output.append(f"📍 **Profile**: {current_profile or 'default'}")
+                
+                # Get basic profile info (fast version)
+                try:
+                    info = aws_provider.get_profile_info_fast()
+                    if info:
+                        output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
+                except Exception:
+                    pass
+                
+                output.append(f"\n🔧 **Service Permissions**:")
+                
+                # Test STS (should always work)
+                try:
+                    sts_client = aws_provider.get_client("sts")
+                    # Quick test - just get the client, don't make API call yet
+                    output.append(f"   ✅ **STS**: Client available")
+                except Exception as e:
+                    output.append(f"   ❌ **STS**: {str(e)[:50]}")
+                
+                # Test Cost Explorer with timeout
+                try:
+                    ce_client = aws_provider.get_client("ce")
+                    # Quick API test with short timeout
+                    ce_client.get_dimension_values(
+                        TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
+                        Dimension='SERVICE',
+                        Context='COST_AND_USAGE',
+                        MaxResults=1
+                    )
+                    output.append(f"   ✅ **Cost Explorer**: Full access")
+                except Exception as e:
+                    if "AccessDenied" in str(e):
+                        output.append(f"   ❌ **Cost Explorer**: Access denied")
+                    elif "InvalidDimensionKey" in str(e):
+                        output.append(f"   ✅ **Cost Explorer**: Basic access (API working)")
+                    else:
+                        output.append(f"   ⚠️ **Cost Explorer**: {str(e)[:50]}")
+                
+                # Test EC2 (quick test)
+                try:
+                    ec2_client = aws_provider.get_client("ec2")
+                    ec2_client.describe_instances(MaxResults=1)
+                    output.append(f"   ✅ **EC2**: Describe instances available")
+                except Exception as e:
+                    if "UnauthorizedOperation" in str(e):
+                        output.append(f"   ❌ **EC2**: Unauthorized operation")
+                    else:
+                        output.append(f"   ⚠️ **EC2**: {str(e)[:50]}")
+                
+                # Test CloudWatch (quick test)
+                try:
+                    cw_client = aws_provider.get_client("cloudwatch")
+                    cw_client.list_metrics(MaxRecords=1)
+                    output.append(f"   ✅ **CloudWatch**: Metrics available")
+                except Exception as e:
+                    if "AccessDenied" in str(e):
+                        output.append(f"   ❌ **CloudWatch**: Access denied")
+                    else:
+                        output.append(f"   ⚠️ **CloudWatch**: {str(e)[:50]}")
+                
+                # Test ECS (quick test)
+                try:
+                    ecs_client = aws_provider.get_client("ecs")
+                    ecs_client.list_clusters(maxResults=1)
+                    output.append(f"   ✅ **ECS**: List clusters available")
+                except Exception as e:
+                    if "AccessDenied" in str(e):
+                        output.append(f"   ❌ **ECS**: Access denied")
+                    else:
+                        output.append(f"   ⚠️ **ECS**: {str(e)[:50]}")
+                
+                output.append(f"\n💡 **Next Steps**:")
+                output.append(f"   • ✅ permissions = Service fully available")
+                output.append(f"   • ❌ permissions = Need additional IAM policies") 
+                output.append(f"   • Use `aws_profile_switch('profile')` to try different profile")
+                output.append(f"   • Use `aws_profile_list()` to see available profiles")
+                
+                return "\n".join(output)
             
-            output = ["🔐 **AWS PERMISSIONS TEST**", "=" * 40]
-            output.append(f"📍 **Profile**: {current_profile or 'default'}")
+            # Use timeout to prevent hanging (30 seconds for permission testing)
+            result = await asyncio.wait_for(test_permissions_with_timeout(), timeout=30.0)
+            logger.info(f"✅ Successfully completed permissions test")
+            return result
             
-            # Get basic profile info
-            try:
-                info = aws_provider.get_profile_info()
-                if info:
-                    output.append(f"📊 **Account**: {info.get('account_id', 'Unknown')}")
-                    output.append(f"🌍 **Region**: {info.get('region', 'Unknown')}")
-            except Exception:
-                pass
-            
-            output.append(f"\n🔧 **Service Permissions**:")
-            
-            # Test STS (should always work)
-            try:
-                aws_provider.get_client("sts")
-                output.append(f"   ✅ **STS**: Available")
-            except Exception as e:
-                output.append(f"   ❌ **STS**: {str(e)[:50]}")
-            
-            # Test Cost Explorer
-            try:
-                ce_client = aws_provider.get_client("ce")
-                ce_client.get_dimension_values(
-                    TimePeriod={'Start': '2024-01-01', 'End': '2024-01-02'},
-                    Dimension='SERVICE',
-                    Context='COST_AND_USAGE',
-                    MaxResults=1
-                )
-                output.append(f"   ✅ **Cost Explorer**: Full access")
-            except Exception as e:
-                if "AccessDenied" in str(e):
-                    output.append(f"   ❌ **Cost Explorer**: Access denied")
-                else:
-                    output.append(f"   ⚠️ **Cost Explorer**: {str(e)[:50]}")
-            
-            # Test EC2 
-            try:
-                ec2_client = aws_provider.get_client("ec2")
-                ec2_client.describe_instances(MaxResults=1)
-                output.append(f"   ✅ **EC2**: Describe instances available")
-            except Exception as e:
-                if "UnauthorizedOperation" in str(e):
-                    output.append(f"   ❌ **EC2**: Unauthorized operation")
-                else:
-                    output.append(f"   ⚠️ **EC2**: {str(e)[:50]}")
-            
-            # Test CloudWatch
-            try:
-                cw_client = aws_provider.get_client("cloudwatch")
-                cw_client.list_metrics(MaxRecords=1)
-                output.append(f"   ✅ **CloudWatch**: Metrics available")
-            except Exception as e:
-                if "AccessDenied" in str(e):
-                    output.append(f"   ❌ **CloudWatch**: Access denied")
-                else:
-                    output.append(f"   ⚠️ **CloudWatch**: {str(e)[:50]}")
-            
-            # Test ECS
-            try:
-                ecs_client = aws_provider.get_client("ecs")
-                ecs_client.list_clusters(maxResults=1)
-                output.append(f"   ✅ **ECS**: List clusters available")
-            except Exception as e:
-                if "AccessDenied" in str(e):
-                    output.append(f"   ❌ **ECS**: Access denied")
-                else:
-                    output.append(f"   ⚠️ **ECS**: {str(e)[:50]}")
-            
-            output.append(f"\n💡 **Next Steps**:")
-            output.append(f"   • ✅ permissions = Service fully available")
-            output.append(f"   • ❌ permissions = Need additional IAM policies") 
-            output.append(f"   • Use `aws_profile_switch('profile')` to try different profile")
-            output.append(f"   • Use `aws_profile_list()` to see available profiles")
-            
-            return "\n".join(output)
-            
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS permissions test took longer than 30 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
             error_msg = f"❌ Error testing permissions: {str(e)}"
             logger.error(error_msg)

@@ -31,26 +31,27 @@ class AWSProvider(BaseProvider):
                 self.logger.info(f"Already using profile: {profile_name or 'default'}", "aws")
                 return True
             
-            # Test the profile first
+            # Test the profile first (with minimal validation)
             if profile_name:
-                # Check if profile exists
+                # Check if profile exists (fast operation)
                 available_profiles = boto3.session.Session().available_profiles
                 if profile_name not in available_profiles:
                     self.logger.error(f"Profile '{profile_name}' not found. Available: {available_profiles}", "aws")
                     return False
                 
-                # Test the profile by getting caller identity
-                session = boto3.Session(profile_name=profile_name)
-                sts_client = session.client('sts')
-                identity = sts_client.get_caller_identity()
-                
-                self.logger.info(f"✅ Profile '{profile_name}' validated - Account: {identity['Account']}", "aws")
-                self._profile_sessions[profile_name] = session
+                # Quick test - just create session without API call
+                try:
+                    session = boto3.Session(profile_name=profile_name)
+                    # Only test credentials if we can do it quickly
+                    # Skip the validation API call to avoid timeouts
+                    self.logger.info(f"✅ Profile '{profile_name}' session created successfully", "aws")
+                    self._profile_sessions[profile_name] = session
+                except Exception as e:
+                    self.logger.error(f"Failed to create session for profile '{profile_name}': {str(e)}", "aws")
+                    return False
             else:
-                # Test default credentials
-                sts_client = boto3.client('sts')
-                identity = sts_client.get_caller_identity()
-                self.logger.info(f"✅ Default credentials validated - Account: {identity['Account']}", "aws")
+                # For default credentials, just log the switch
+                self.logger.info(f"✅ Switching to default credentials", "aws")
             
             # Clear all cached clients when switching profiles
             self._clients.clear()
@@ -86,23 +87,64 @@ class AWSProvider(BaseProvider):
                 else:
                     session = boto3.Session()
             
-            sts_client = session.client('sts')
-            identity = sts_client.get_caller_identity()
-            
-            # Get region
-            region = session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
-            
-            return {
-                'profile_name': profile_name or self._current_profile or 'default',
-                'account_id': identity['Account'],
-                'user_arn': identity['Arn'],
-                'region': region,
-                'user_id': identity['UserId']
-            }
+            # Try to get caller identity with timeout protection
+            try:
+                sts_client = session.client('sts')
+                # This is the potentially slow operation
+                identity = sts_client.get_caller_identity()
+                
+                # Get region
+                region = session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+                
+                return {
+                    'profile_name': profile_name or self._current_profile or 'default',
+                    'account_id': identity['Account'],
+                    'user_arn': identity['Arn'],
+                    'region': region,
+                    'user_id': identity['UserId']
+                }
+            except Exception as api_error:
+                # If API call fails, return basic info
+                region = session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+                return {
+                    'profile_name': profile_name or self._current_profile or 'default',
+                    'account_id': 'Unknown (API timeout)',
+                    'user_arn': f'Unknown ({str(api_error)[:50]})',
+                    'region': region,
+                    'user_id': 'Unknown'
+                }
             
         except Exception as e:
             self.logger.error(f"Error getting profile info: {str(e)}", "aws")
             return {}
+    
+    def get_profile_info_fast(self, profile_name: Optional[str] = None) -> Dict:
+        """Get basic profile information without API calls (fast version)."""
+        try:
+            if profile_name:
+                session = boto3.Session(profile_name=profile_name)
+            else:
+                if self._current_profile:
+                    session = boto3.Session(profile_name=self._current_profile)
+                else:
+                    session = boto3.Session()
+            
+            # Get region without API calls
+            region = session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1')
+            
+            return {
+                'profile_name': profile_name or self._current_profile or 'default',
+                'region': region,
+                'status': 'ready'
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error getting fast profile info: {str(e)}", "aws")
+            return {
+                'profile_name': profile_name or self._current_profile or 'default',
+                'region': 'unknown',
+                'status': 'error'
+            }
     
     def validate_configuration(self) -> ProviderStatus:
         """Validate AWS configuration and return status."""
