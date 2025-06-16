@@ -28,61 +28,83 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
         region: Optional[str] = None
     ) -> str:
         """AWS Cost Explorer: Discover all available dimensions for cost analysis."""
+        import asyncio
+        
         logger.info(f"🔍 Discovering AWS Cost Explorer dimensions for {days} days...")
         
         try:
-            ce_client = aws_provider.get_client("ce", account_id, region)
+            async def discover_dimensions_with_timeout():
+                logger.info(f"🔍 Connecting to AWS Cost Explorer...")
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                logger.info(f"✅ Connected to AWS Cost Explorer")
+                
+                # Get date range
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                logger.info(f"📅 Querying period: {start_date} to {end_date}")
+                
+                # Get all available dimensions
+                dimensions = [
+                    'AZ', 'INSTANCE_TYPE', 'LINKED_ACCOUNT', 'OPERATION', 'PURCHASE_TYPE',
+                    'REGION', 'SERVICE', 'USAGE_TYPE', 'USAGE_TYPE_GROUP', 'RECORD_TYPE',
+                    'OPERATING_SYSTEM', 'TENANCY', 'SCOPE', 'PLATFORM', 'SUBSCRIPTION_ID',
+                    'LEGAL_ENTITY_NAME', 'DEPLOYMENT_OPTION', 'DATABASE_ENGINE',
+                    'CACHE_ENGINE', 'INSTANCE_TYPE_FAMILY', 'BILLING_ENTITY', 'RESERVATION_ID',
+                    'RESOURCE_ID', 'RIGHTSIZING_TYPE', 'SAVINGS_PLANS_TYPE', 'SAVINGS_PLAN_ARN',
+                    'PAYMENT_OPTION', 'AGREEMENT_END_DATE_TIME_AFTER', 'AGREEMENT_END_DATE_TIME_BEFORE'
+                ]
+                
+                output = ["🔍 **AWS COST EXPLORER DIMENSIONS**", "=" * 50]
+                logger.info(f"🔄 Testing {len(dimensions)} dimensions...")
+                
+                successful_dimensions = 0
+                for i, dimension in enumerate(dimensions, 1):
+                    try:
+                        logger.info(f"🔍 Testing dimension {i}/{len(dimensions)}: {dimension}")
+                        response = ce_client.get_dimension_values(
+                            TimePeriod={
+                                'Start': start_date.strftime('%Y-%m-%d'),
+                                'End': end_date.strftime('%Y-%m-%d')
+                            },
+                            Dimension=dimension,
+                            Context='COST_AND_USAGE',
+                            MaxResults=5
+                        )
+                        
+                        values = [item['Value'] for item in response.get('DimensionValues', [])]
+                        total_count = response.get('TotalSize', 0)
+                        
+                        if values:
+                            output.append(f"\n📊 **{dimension}** ({total_count} total values)")
+                            output.append(f"   Sample values: {', '.join(values[:3])}")
+                            if total_count > 3:
+                                output.append(f"   ... and {total_count - 3} more")
+                            successful_dimensions += 1
+                        
+                    except Exception as e:
+                        if "InvalidDimensionKey" not in str(e):
+                            output.append(f"\n⚠️ **{dimension}**: Error - {str(e)}")
+                            logger.warning(f"Dimension {dimension} failed: {e}")
+                
+                logger.info(f"✅ Successfully tested {successful_dimensions} dimensions")
+                output.append(f"\n📈 **Analysis Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"🔧 **Usage**: Use `aws_cost_explorer_analyze_by_dimension(dimension_name)` to analyze any dimension")
+                
+                return "\n".join(output)
             
-            # Get date range
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
+            # Use timeout to prevent hanging (60 seconds for this more complex operation)
+            result = await asyncio.wait_for(discover_dimensions_with_timeout(), timeout=60.0)
+            logger.info(f"✅ Successfully completed dimension discovery")
+            return result
             
-            # Get all available dimensions
-            dimensions = [
-                'AZ', 'INSTANCE_TYPE', 'LINKED_ACCOUNT', 'OPERATION', 'PURCHASE_TYPE',
-                'REGION', 'SERVICE', 'USAGE_TYPE', 'USAGE_TYPE_GROUP', 'RECORD_TYPE',
-                'OPERATING_SYSTEM', 'TENANCY', 'SCOPE', 'PLATFORM', 'SUBSCRIPTION_ID',
-                'LEGAL_ENTITY_NAME', 'DEPLOYMENT_OPTION', 'DATABASE_ENGINE',
-                'CACHE_ENGINE', 'INSTANCE_TYPE_FAMILY', 'BILLING_ENTITY', 'RESERVATION_ID',
-                'RESOURCE_ID', 'RIGHTSIZING_TYPE', 'SAVINGS_PLANS_TYPE', 'SAVINGS_PLAN_ARN',
-                'PAYMENT_OPTION', 'AGREEMENT_END_DATE_TIME_AFTER', 'AGREEMENT_END_DATE_TIME_BEFORE'
-            ]
-            
-            output = ["🔍 **AWS COST EXPLORER DIMENSIONS**", "=" * 50]
-            
-            for dimension in dimensions:
-                try:
-                    response = ce_client.get_dimension_values(
-                        TimePeriod={
-                            'Start': start_date.strftime('%Y-%m-%d'),
-                            'End': end_date.strftime('%Y-%m-%d')
-                        },
-                        Dimension=dimension,
-                        Context='COST_AND_USAGE',
-                        MaxResults=5
-                    )
-                    
-                    values = [item['Value'] for item in response.get('DimensionValues', [])]
-                    total_count = response.get('TotalSize', 0)
-                    
-                    if values:
-                        output.append(f"\n📊 **{dimension}** ({total_count} total values)")
-                        output.append(f"   Sample values: {', '.join(values[:3])}")
-                        if total_count > 3:
-                            output.append(f"   ... and {total_count - 3} more")
-                    
-                except Exception as e:
-                    if "InvalidDimensionKey" not in str(e):
-                        output.append(f"\n⚠️ **{dimension}**: Error - {str(e)}")
-            
-            output.append(f"\n📈 **Analysis Period**: {start_date} to {end_date} ({days} days)")
-            output.append(f"🔧 **Usage**: Use `aws_cost_explorer_analyze_by_dimension(dimension_name)` to analyze any dimension")
-            
-            return "\n".join(output)
-            
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS dimension discovery took longer than 60 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
-            logger.error(f"Error discovering dimensions: {str(e)}")
-            return f"❌ Error discovering dimensions: {str(e)}"
+            error_msg = f"❌ Error discovering dimensions: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
     
     @mcp.tool()
     async def aws_cost_explorer_get_dimension_values(
@@ -93,49 +115,69 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
         max_results: int = 50
     ) -> str:
         """AWS Cost Explorer: Get all values for a specific dimension."""
+        import asyncio
+        
         logger.info(f"📋 Getting values for dimension: {dimension}")
         
         try:
-            ce_client = aws_provider.get_client("ce", account_id, region)
+            # Add timeout to prevent hanging
+            async def get_dimension_values_with_timeout():
+                logger.info(f"🔍 Connecting to AWS Cost Explorer...")
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                logger.info(f"✅ Connected to AWS Cost Explorer")
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                logger.info(f"📅 Querying period: {start_date} to {end_date}")
+                
+                logger.info(f"🔄 Making API call for dimension: {dimension}")
+                response = ce_client.get_dimension_values(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Dimension=dimension,
+                    Context='COST_AND_USAGE',
+                    MaxResults=max_results
+                )
+                logger.info(f"✅ API call completed successfully")
+                
+                values = response.get('DimensionValues', [])
+                total_count = response.get('TotalSize', 0)
+                logger.info(f"📊 Received {len(values)} values (total: {total_count})")
+                
+                output = [f"📋 **{dimension} VALUES**", "=" * 50]
+                output.append(f"📊 **Total Count**: {total_count}")
+                output.append(f"📅 **Period**: {start_date} to {end_date}")
+                
+                if values:
+                    output.append(f"\n🔍 **Available Values** (showing {len(values)} of {total_count}):")
+                    for i, item in enumerate(values, 1):
+                        value = item['Value']
+                        attributes = item.get('Attributes', {})
+                        
+                        output.append(f"{i:2d}. {value}")
+                        if attributes:
+                            for key, attr_value in attributes.items():
+                                output.append(f"     {key}: {attr_value}")
+                else:
+                    output.append("\n⚠️ No values found for this dimension in the specified time period")
+                
+                return "\n".join(output)
             
-            end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=days)
+            # Use timeout to prevent hanging (30 seconds)
+            result = await asyncio.wait_for(get_dimension_values_with_timeout(), timeout=30.0)
+            logger.info(f"✅ Successfully completed dimension values query")
+            return result
             
-            response = ce_client.get_dimension_values(
-                TimePeriod={
-                    'Start': start_date.strftime('%Y-%m-%d'),
-                    'End': end_date.strftime('%Y-%m-%d')
-                },
-                Dimension=dimension,
-                Context='COST_AND_USAGE',
-                MaxResults=max_results
-            )
-            
-            values = response.get('DimensionValues', [])
-            total_count = response.get('TotalSize', 0)
-            
-            output = [f"📋 **{dimension} VALUES**", "=" * 50]
-            output.append(f"📊 **Total Count**: {total_count}")
-            output.append(f"📅 **Period**: {start_date} to {end_date}")
-            
-            if values:
-                output.append(f"\n🔍 **Available Values** (showing {len(values)} of {total_count}):")
-                for i, item in enumerate(values, 1):
-                    value = item['Value']
-                    attributes = item.get('Attributes', {})
-                    
-                    output.append(f"{i:2d}. {value}")
-                    if attributes:
-                        for key, attr_value in attributes.items():
-                            output.append(f"     {key}: {attr_value}")
-            else:
-                output.append("\n⚠️ No values found for this dimension in the specified time period")
-            
-            return "\n".join(output)
-            
+        except asyncio.TimeoutError:
+            error_msg = f"⏰ Timeout: AWS Cost Explorer query for dimension '{dimension}' took longer than 30 seconds"
+            logger.error(error_msg)
+            return error_msg
         except Exception as e:
-            logger.error(f"Error getting dimension values: {str(e)}")
-            return f"❌ Error getting dimension values: {str(e)}"
+            error_msg = f"❌ Error getting dimension values: {str(e)}"
+            logger.error(error_msg)
+            return error_msg
     
     @mcp.tool()
     async def aws_cost_explorer_analyze_by_dimension(
