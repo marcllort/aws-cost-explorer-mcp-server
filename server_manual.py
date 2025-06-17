@@ -60,6 +60,10 @@ def get_enabled_providers():
 def main():
     """Main server entry point with environment-based configuration."""
     
+    # Enable custom tools by default if not explicitly set
+    if 'AUTOCOST_ENABLE_CUSTOM_TOOLS' not in os.environ:
+        os.environ['AUTOCOST_ENABLE_CUSTOM_TOOLS'] = 'true'
+    
     # Handle command line arguments
     if len(sys.argv) > 1:
         if sys.argv[1] == "--test":
@@ -95,7 +99,8 @@ def main():
                         capabilities = ", ".join(status.capabilities)
                         print(f"✅ {provider_name.upper()}: ready with capabilities: {capabilities}")
                     else:
-                        print(f"❌ {provider_name.upper()}: {status.status} - {status.error}")
+                        error_msg = status.error_message or "Unknown error"
+                        print(f"❌ {provider_name.upper()}: {status.status} - {error_msg}")
                 else:
                     print(f"❌ {provider_name.upper()}: not configured")
             

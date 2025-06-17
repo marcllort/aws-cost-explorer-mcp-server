@@ -202,6 +202,24 @@ After running `python start.py` and configuring Claude Desktop:
    - "Which services are costing the most this month?"
    - "Analyze costs by environment tag"
    - "Get performance insights for EC2 instances"
+   - "Run a 28-day rolling average analysis"
+   - "Analyze ECS costs with Container Insights impact"
+   - "Detect tenant anomalies in the last week"
+
+### Environment Configuration
+
+Set these environment variables to customize behavior:
+
+```bash
+# Enable/disable company-specific tools (default: true)
+export AUTOCOST_ENABLE_CUSTOM_TOOLS=true
+
+# Configure enabled providers (default: all available)
+export AUTOCOST_PROVIDERS=aws,gcp,azure
+
+# Set endpoint identifier for multi-endpoint setups
+export AUTOCOST_ENDPOINT=production
+```
 
 ### AWS Profile Switching
 
@@ -267,6 +285,23 @@ The MCP server provides these tools through Claude Desktop:
 - **`aws_performance_ec2_insights`**: EC2 performance metrics with cost correlation *(requires enhanced permissions)*
 - **`get_ecs_performance_insights`**: ECS performance analysis *(requires enhanced permissions)*  
 - **`get_cost_optimization_recommendations`**: AI-powered optimization suggestions
+
+#### AWS Advanced Cost Analysis
+- **`aws_rolling_average_analysis`**: 28-day rolling average cost analysis with trend detection
+- **`aws_ecs_cost_deep_dive`**: Detailed ECS cost breakdown (Fargate vs EC2, Container Insights impact)
+- **`aws_spot_instance_cost_impact`**: Spot vs On-Demand analysis with volatility tracking
+- **`aws_savings_plan_utilization_analysis`**: Savings Plan efficiency and waste detection
+- **`aws_tenant_cost_analysis`**: Cost breakdown by organization/tenant with anomaly detection
+- **`aws_redshift_cost_analysis`**: Cluster-by-cluster Redshift cost analysis
+- **`aws_spot_capacity_impact_analysis`**: Spot capacity constraints and Savings Plan spillover analysis
+- **`aws_container_insights_cost_analysis`**: Container Insights monitoring costs and ROI analysis
+- **`aws_cross_service_impact_analysis`**: Track cascading cost impacts across services
+- **`aws_savings_plan_spillover_analysis`**: Analyze spillover when spot unavailability forces SP consumption
+- **`aws_instance_type_capacity_strategy`**: Instance type diversification and capacity planning recommendations
+
+#### Company-Specific Tools *(Optional - Enable via `AUTOCOST_ENABLE_CUSTOM_TOOLS=true`)*
+- **`aws_tenant_anomaly_detector`**: Detect unusual tenant spending patterns with baseline comparison
+- **`aws_uat_environment_cost_monitor`**: Monitor UAT vs Production cost ratios and identify optimization opportunities
 
 ## 📁 Project Structure
 

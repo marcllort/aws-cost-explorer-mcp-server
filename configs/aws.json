@@ -7,5 +7,8 @@
   "pre_run_commands": [
     "assume billing_read_only.root.okta",
     "unset AWS_SESSION_TOKEN"
-  ]
+  ],
+  "environment": {
+    "AUTOCOST_ENABLE_CUSTOM_TOOLS": "true"
+  }
 }

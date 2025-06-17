@@ -21,6 +21,10 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
     
     logger.info("🔧 Registering AWS Cost Explorer tools...")
     
+    # Register advanced cost analysis tools
+    from .aws_cost_analysis import register_aws_cost_analysis_tools
+    register_aws_cost_analysis_tools(mcp, provider_manager, config, logger)
+    
     # AWS PROFILE MANAGEMENT TOOLS
     @mcp.tool()
     async def aws_profile_list() -> str:

@@ -2,5 +2,8 @@
   "endpoint_id": "unified",
   "providers": ["aws", "gcp", "azure", "datadog"],
   "port": 8001,
-  "name": "Autocost Controller (Unified)"
+  "name": "Autocost Controller (Unified)",
+  "environment": {
+    "AUTOCOST_ENABLE_CUSTOM_TOOLS": "true"
+  }
 } 

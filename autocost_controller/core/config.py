@@ -59,6 +59,9 @@ class Config:
         self.arm_savings_percentage = float(os.environ.get('ARM_SAVINGS_PERCENTAGE', '20.0'))
         self.spot_savings_percentage = float(os.environ.get('SPOT_SAVINGS_PERCENTAGE', '50.0'))
         self.reserved_instance_savings = float(os.environ.get('RESERVED_INSTANCE_SAVINGS', '30.0'))
+        
+        # Custom tools enablement (enabled by default)
+        self.enable_custom_tools = os.environ.get('AUTOCOST_ENABLE_CUSTOM_TOOLS', 'true').lower() == 'true'
     
     def _parse_enabled_providers(self) -> Set[str]:
         """Parse enabled providers from environment variable."""

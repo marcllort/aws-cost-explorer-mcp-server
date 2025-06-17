@@ -1213,4 +1213,1154 @@ def register_aws_cost_analysis_tools(mcp: FastMCP, provider_manager: ProviderMan
         except asyncio.TimeoutError:
             return f"⏰ Timeout: {service_name} tenant analysis took longer than 45 seconds"
         except Exception as e:
-            return f"❌ Error analyzing {service_name} tenant costs: {str(e)}" 
+            return f"❌ Error analyzing {service_name} tenant costs: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_spot_capacity_impact_analysis(
+        days: int = 7,
+        region: Optional[str] = None,
+        instance_types: Optional[List[str]] = None,
+        threshold_volatility: float = 30.0,
+        account_id: Optional[str] = None
+    ) -> str:
+        """AWS Spot Capacity: Analyze spot capacity constraints and cost impact on Savings Plans."""
+        import asyncio
+        
+        logger.info(f"💡 Analyzing spot capacity impact for {days} days...")
+        
+        try:
+            async def analyze_spot_capacity_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                
+                # Get spot vs on-demand costs by instance type and AZ
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost', 'UsageQuantity'],
+                    GroupBy=[
+                        {'Type': 'DIMENSION', 'Key': 'PURCHASE_TYPE'},
+                        {'Type': 'DIMENSION', 'Key': 'INSTANCE_TYPE'},
+                        {'Type': 'DIMENSION', 'Key': 'AVAILABILITY_ZONE'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon Elastic Compute Cloud - Compute'],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Get Savings Plans utilization for correlation
+                try:
+                    sp_response = ce_client.get_savings_plans_utilization(
+                        TimePeriod={
+                            'Start': start_date.strftime('%Y-%m-%d'),
+                            'End': end_date.strftime('%Y-%m-%d')
+                        },
+                        Granularity='DAILY'
+                    )
+                except Exception:
+                    sp_response = {'SavingsPlansUtilizationsByTime': []}
+                
+                # Process spot capacity data
+                daily_spot_data = {}
+                daily_ondemand_data = {}
+                instance_type_volatility = {}
+                az_capacity_issues = {}
+                
+                for result in response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 3:
+                            purchase_type = keys[0]
+                            instance_type = keys[1]
+                            az = keys[2]
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            usage = float(group.get('Metrics', {}).get('UsageQuantity', {}).get('Amount', 0))
+                            
+                            if 'Spot' in purchase_type and cost > 0:
+                                if date not in daily_spot_data:
+                                    daily_spot_data[date] = {}
+                                if instance_type not in daily_spot_data[date]:
+                                    daily_spot_data[date][instance_type] = {}
+                                daily_spot_data[date][instance_type][az] = {
+                                    'cost': cost, 'usage': usage
+                                }
+                                
+                            elif 'On Demand' in purchase_type and cost > 0:
+                                if date not in daily_ondemand_data:
+                                    daily_ondemand_data[date] = {}
+                                if instance_type not in daily_ondemand_data[date]:
+                                    daily_ondemand_data[date][instance_type] = {}
+                                daily_ondemand_data[date][instance_type][az] = {
+                                    'cost': cost, 'usage': usage
+                                }
+                
+                # Process Savings Plans utilization
+                sp_utilization_by_date = {}
+                for sp_result in sp_response.get('SavingsPlansUtilizationsByTime', []):
+                    date = sp_result['TimePeriod']['Start']
+                    util = sp_result['Utilization']
+                    utilization_pct = float(util.get('UtilizationPercentage', 0))
+                    unused_commitment = float(util.get('UnusedCommitment', {}).get('Amount', 0))
+                    sp_utilization_by_date[date] = {
+                        'utilization': utilization_pct,
+                        'unused': unused_commitment
+                    }
+                
+                # Calculate capacity volatility by instance type
+                for instance_type in set().union(*[list(data.keys()) for data in daily_spot_data.values()]):
+                    daily_costs = []
+                    for date in sorted(daily_spot_data.keys()):
+                        if instance_type in daily_spot_data[date]:
+                            total_cost = sum(az_data['cost'] for az_data in daily_spot_data[date][instance_type].values())
+                            daily_costs.append(total_cost)
+                    
+                    if len(daily_costs) >= 3:
+                        avg_cost = sum(daily_costs) / len(daily_costs)
+                        max_cost = max(daily_costs)
+                        min_cost = min(daily_costs)
+                        if avg_cost > 0:
+                            volatility = ((max_cost - min_cost) / avg_cost) * 100
+                            instance_type_volatility[instance_type] = volatility
+                
+                # Identify capacity constraint events
+                capacity_events = []
+                for date in sorted(daily_spot_data.keys()):
+                    spot_total = sum(
+                        sum(az_data['cost'] for az_data in instance_data.values())
+                        for instance_data in daily_spot_data[date].values()
+                    )
+                    ondemand_total = sum(
+                        sum(az_data['cost'] for az_data in instance_data.values())
+                        for instance_data in daily_ondemand_data.get(date, {}).values()
+                    )
+                    
+                    if spot_total > 0 and ondemand_total > 0:
+                        spot_ratio = spot_total / (spot_total + ondemand_total) * 100
+                        
+                        # If spot ratio drops significantly, it might indicate capacity issues
+                        if spot_ratio < 30:  # Less than 30% spot usage might indicate constraints
+                            sp_data = sp_utilization_by_date.get(date, {})
+                            capacity_events.append({
+                                'date': date,
+                                'spot_ratio': spot_ratio,
+                                'spot_cost': spot_total,
+                                'ondemand_cost': ondemand_total,
+                                'sp_utilization': sp_data.get('utilization', 0),
+                                'sp_unused': sp_data.get('unused', 0)
+                            })
+                
+                output = ["💡 **SPOT CAPACITY IMPACT ANALYSIS**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                
+                # Show instance type volatility
+                if instance_type_volatility:
+                    high_volatility = {k: v for k, v in instance_type_volatility.items() if v > threshold_volatility}
+                    output.append(f"\n🌊 **HIGH VOLATILITY INSTANCE TYPES** (>{threshold_volatility}%):")
+                    for instance_type, volatility in sorted(high_volatility.items(), key=lambda x: x[1], reverse=True)[:10]:
+                        output.append(f"   • {instance_type}: {volatility:.1f}% volatility")
+                
+                # Show capacity constraint events
+                if capacity_events:
+                    output.append(f"\n🚨 **CAPACITY CONSTRAINT EVENTS** ({len(capacity_events)} detected):")
+                    total_spillover_cost = 0
+                    for event in capacity_events[-5:]:  # Show last 5 events
+                        spillover = event['ondemand_cost'] - (event['spot_cost'] * 3)  # Estimate spillover
+                        if spillover > 0:
+                            total_spillover_cost += spillover
+                        
+                        output.append(f"   📅 {event['date']}:")
+                        output.append(f"      Spot ratio: {event['spot_ratio']:.1f}%")
+                        output.append(f"      On-Demand spike: ${event['ondemand_cost']:.2f}")
+                        output.append(f"      SP utilization: {event['sp_utilization']:.1f}%")
+                        if spillover > 0:
+                            output.append(f"      Estimated spillover cost: ${spillover:.2f}")
+                
+                # Calculate Savings Plan impact
+                if capacity_events and sp_utilization_by_date:
+                    avg_sp_util_normal = []
+                    avg_sp_util_constrained = []
+                    
+                    normal_dates = [date for date in sp_utilization_by_date.keys() 
+                                   if not any(event['date'] == date for event in capacity_events)]
+                    constrained_dates = [event['date'] for event in capacity_events]
+                    
+                    for date in normal_dates:
+                        avg_sp_util_normal.append(sp_utilization_by_date[date]['utilization'])
+                    
+                    for date in constrained_dates:
+                        if date in sp_utilization_by_date:
+                            avg_sp_util_constrained.append(sp_utilization_by_date[date]['utilization'])
+                    
+                    if avg_sp_util_normal and avg_sp_util_constrained:
+                        normal_avg = sum(avg_sp_util_normal) / len(avg_sp_util_normal)
+                        constrained_avg = sum(avg_sp_util_constrained) / len(avg_sp_util_constrained)
+                        
+                        output.append(f"\n📊 **SAVINGS PLAN IMPACT**:")
+                        output.append(f"   Normal days SP utilization: {normal_avg:.1f}%")
+                        output.append(f"   Constrained days SP utilization: {constrained_avg:.1f}%")
+                        output.append(f"   Impact: {constrained_avg - normal_avg:+.1f}% utilization change")
+                
+                # Recommendations
+                output.append(f"\n💡 **CAPACITY OPTIMIZATION RECOMMENDATIONS**:")
+                
+                if high_volatility:
+                    output.append(f"   🔄 Diversify instance types: {len(high_volatility)} types show high volatility")
+                    top_volatile = list(high_volatility.keys())[:3]
+                    output.append(f"   🎯 Focus on alternatives for: {', '.join(top_volatile)}")
+                
+                if capacity_events:
+                    output.append(f"   📍 Multi-AZ strategy: {len(capacity_events)} capacity constraint events detected")
+                    output.append(f"   ⚡ Implement spot fleet diversification")
+                
+                if total_spillover_cost > 100:
+                    output.append(f"   💰 Estimated weekly spillover cost: ${total_spillover_cost:.2f}")
+                    output.append(f"   📈 Consider Reserved Instances for baseline capacity")
+                
+                output.append(f"   📊 Monitor spot pricing trends and capacity metrics")
+                output.append(f"   🔔 Set up spot interruption rate alerts")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_spot_capacity_with_timeout(), timeout=60.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: Spot capacity analysis took longer than 60 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing spot capacity impact: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_container_insights_cost_analysis(
+        days: int = 7,
+        enable_date: Optional[str] = None,
+        services: Optional[List[str]] = None,
+        account_id: Optional[str] = None,
+        region: Optional[str] = None
+    ) -> str:
+        """AWS Container Insights: Track monitoring costs and optimization ROI."""
+        import asyncio
+        
+        logger.info(f"📊 Analyzing Container Insights costs for {days} days...")
+        
+        try:
+            async def analyze_container_insights_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                
+                # Get CloudWatch costs (Container Insights appears here)
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {'Type': 'DIMENSION', 'Key': 'USAGE_TYPE'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon CloudWatch'],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Get ECS costs for correlation
+                ecs_response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost'],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon Elastic Container Service'],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Process Container Insights costs
+                container_insights_costs = {}
+                cloudwatch_costs = {}
+                total_insights_cost = 0.0
+                
+                for result in response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 1:
+                            usage_type = keys[0]
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            if date not in cloudwatch_costs:
+                                cloudwatch_costs[date] = 0.0
+                            cloudwatch_costs[date] += cost
+                            
+                            # Identify Container Insights specific costs
+                            if any(keyword in usage_type.lower() for keyword in ['container', 'insights', 'ecs', 'fargate']):
+                                if date not in container_insights_costs:
+                                    container_insights_costs[date] = 0.0
+                                container_insights_costs[date] += cost
+                                total_insights_cost += cost
+                
+                # Process ECS costs for correlation
+                ecs_costs = {}
+                total_ecs_cost = 0.0
+                for result in ecs_response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    total_cost = float(result.get('Total', {}).get('BlendedCost', {}).get('Amount', 0))
+                    ecs_costs[date] = total_cost
+                    total_ecs_cost += total_cost
+                
+                # Calculate metrics
+                daily_insights_avg = total_insights_cost / days if days > 0 else 0
+                daily_ecs_avg = total_ecs_cost / days if days > 0 else 0
+                insights_to_ecs_ratio = (total_insights_cost / total_ecs_cost * 100) if total_ecs_cost > 0 else 0
+                
+                output = ["📊 **CONTAINER INSIGHTS COST ANALYSIS**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"💰 **Total Container Insights Cost**: ${total_insights_cost:.2f}")
+                output.append(f"📈 **Daily Average**: ${daily_insights_avg:.2f}")
+                output.append(f"📊 **Monthly Projection**: ${daily_insights_avg * 30:.2f}")
+                
+                # Show cost correlation with ECS
+                output.append(f"\n🔗 **ECS CORRELATION**:")
+                output.append(f"   Total ECS cost: ${total_ecs_cost:.2f}")
+                output.append(f"   Insights as % of ECS: {insights_to_ecs_ratio:.1f}%")
+                output.append(f"   Monitoring cost per ECS dollar: ${total_insights_cost/total_ecs_cost:.3f}" if total_ecs_cost > 0 else "   No ECS costs found")
+                
+                # Show daily trends
+                if len(container_insights_costs) >= 5:
+                    output.append(f"\n📈 **DAILY CONTAINER INSIGHTS COSTS**:")
+                    sorted_dates = sorted(container_insights_costs.keys())[-7:]
+                    for date in sorted_dates:
+                        insights_cost = container_insights_costs.get(date, 0)
+                        ecs_cost = ecs_costs.get(date, 0)
+                        ratio = (insights_cost / ecs_cost * 100) if ecs_cost > 0 else 0
+                        output.append(f"   {date}: ${insights_cost:.2f} ({ratio:.1f}% of ECS)")
+                
+                # Analyze cost impact if enable date provided
+                if enable_date:
+                    try:
+                        enable_dt = datetime.strptime(enable_date, '%Y-%m-%d').date()
+                        if start_date <= enable_dt <= end_date:
+                            pre_enable_costs = [cost for date, cost in container_insights_costs.items() 
+                                              if datetime.strptime(date, '%Y-%m-%d').date() < enable_dt]
+                            post_enable_costs = [cost for date, cost in container_insights_costs.items() 
+                                               if datetime.strptime(date, '%Y-%m-%d').date() >= enable_dt]
+                            
+                            if pre_enable_costs and post_enable_costs:
+                                pre_avg = sum(pre_enable_costs) / len(pre_enable_costs)
+                                post_avg = sum(post_enable_costs) / len(post_enable_costs)
+                                impact = post_avg - pre_avg
+                                
+                                output.append(f"\n📅 **ENABLE DATE IMPACT** ({enable_date}):")
+                                output.append(f"   Pre-enable average: ${pre_avg:.2f}/day")
+                                output.append(f"   Post-enable average: ${post_avg:.2f}/day")
+                                output.append(f"   Daily impact: ${impact:+.2f}")
+                                output.append(f"   Monthly impact: ${impact * 30:+.2f}")
+                    except ValueError:
+                        output.append(f"\n⚠️ Invalid enable_date format. Use YYYY-MM-DD")
+                
+                # ROI Analysis
+                output.append(f"\n💡 **MONITORING ROI ANALYSIS**:")
+                
+                if insights_to_ecs_ratio > 15:
+                    output.append(f"   🔴 HIGH: Monitoring cost is {insights_to_ecs_ratio:.1f}% of ECS costs")
+                    output.append(f"   💡 Consider: Selective monitoring, custom metrics reduction")
+                elif insights_to_ecs_ratio > 5:
+                    output.append(f"   🟡 MODERATE: Monitoring cost is {insights_to_ecs_ratio:.1f}% of ECS costs")
+                    output.append(f"   📊 Review: Which metrics provide the most value")
+                else:
+                    output.append(f"   🟢 REASONABLE: Monitoring cost is {insights_to_ecs_ratio:.1f}% of ECS costs")
+                
+                # Cost optimization recommendations
+                output.append(f"\n💰 **COST OPTIMIZATION OPPORTUNITIES**:")
+                
+                if daily_insights_avg > 100:
+                    output.append(f"   📉 Reduce metric retention period (default: 15 months)")
+                    output.append(f"   🎯 Enable selective monitoring for non-critical services")
+                    savings_potential = daily_insights_avg * 0.3
+                    output.append(f"   💡 Potential savings: ${savings_potential:.2f}/day (30% reduction)")
+                
+                if daily_insights_avg > 50:
+                    output.append(f"   📊 Custom metric filtering for less critical data")
+                    output.append(f"   🔄 Consider CloudWatch Logs Insights for specific queries")
+                
+                output.append(f"   📈 Monitor metric usage patterns and optimize accordingly")
+                output.append(f"   🎯 Focus monitoring on production vs UAT environments")
+                
+                # Value assessment
+                if total_insights_cost > 0:
+                    cost_per_day = total_insights_cost / days
+                    output.append(f"\n📊 **VALUE ASSESSMENT**:")
+                    output.append(f"   Cost per day of monitoring: ${cost_per_day:.2f}")
+                    output.append(f"   Break-even: Needs to prevent >${cost_per_day:.2f}/day in issues")
+                    output.append(f"   💡 Track: Incidents prevented, MTTR improvements, optimization insights")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_container_insights_with_timeout(), timeout=45.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: Container Insights analysis took longer than 45 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing Container Insights costs: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_cross_service_impact_analysis(
+        primary_service: str = "Amazon Elastic Compute Cloud - Compute",
+        secondary_services: Optional[List[str]] = None,
+        correlation_period: int = 14,
+        account_id: Optional[str] = None,
+        region: Optional[str] = None
+    ) -> str:
+        """AWS Cross-Service Impact: Track how issues in one service impact other services."""
+        import asyncio
+        
+        if secondary_services is None:
+            secondary_services = [
+                "Amazon Elastic Container Service",
+                "AWS Savings Plans for Compute",
+                "Amazon Elastic Load Balancing"
+            ]
+        
+        logger.info(f"🔗 Analyzing cross-service impact for {correlation_period} days...")
+        
+        try:
+            async def analyze_cross_service_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=correlation_period)
+                
+                # Get primary service costs
+                primary_response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost'],
+                    GroupBy=[
+                        {'Type': 'DIMENSION', 'Key': 'PURCHASE_TYPE'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': [primary_service],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Get secondary services costs
+                secondary_responses = {}
+                for service in secondary_services:
+                    try:
+                        response = ce_client.get_cost_and_usage(
+                            TimePeriod={
+                                'Start': start_date.strftime('%Y-%m-%d'),
+                                'End': end_date.strftime('%Y-%m-%d')
+                            },
+                            Granularity='DAILY',
+                            Metrics=['BlendedCost'],
+                            Filter={
+                                'Dimensions': {
+                                    'Key': 'SERVICE',
+                                    'Values': [service],
+                                    'MatchOptions': ['EQUALS']
+                                }
+                            }
+                        )
+                        secondary_responses[service] = response
+                    except Exception as e:
+                        logger.warning(f"Could not get data for {service}: {e}")
+                
+                # Process primary service data
+                primary_daily_costs = {}
+                primary_spot_costs = {}
+                primary_ondemand_costs = {}
+                
+                for result in primary_response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    primary_daily_costs[date] = 0.0
+                    primary_spot_costs[date] = 0.0
+                    primary_ondemand_costs[date] = 0.0
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 1:
+                            purchase_type = keys[0]
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            primary_daily_costs[date] += cost
+                            
+                            if 'Spot' in purchase_type:
+                                primary_spot_costs[date] += cost
+                            elif 'On Demand' in purchase_type:
+                                primary_ondemand_costs[date] += cost
+                
+                # Process secondary services data
+                secondary_daily_costs = {}
+                for service, response in secondary_responses.items():
+                    secondary_daily_costs[service] = {}
+                    
+                    for result in response.get('ResultsByTime', []):
+                        date = result['TimePeriod']['Start']
+                        total_cost = float(result.get('Total', {}).get('BlendedCost', {}).get('Amount', 0))
+                        secondary_daily_costs[service][date] = total_cost
+                
+                # Calculate correlations
+                correlation_matrix = {}
+                impact_events = []
+                
+                # Analyze spot vs on-demand correlation with secondary services
+                sorted_dates = sorted(primary_daily_costs.keys())
+                
+                for date in sorted_dates:
+                    primary_total = primary_daily_costs[date]
+                    spot_cost = primary_spot_costs[date]
+                    ondemand_cost = primary_ondemand_costs[date]
+                    
+                    if primary_total > 0:
+                        spot_ratio = spot_cost / primary_total
+                        
+                        # Detect potential capacity constraint (low spot ratio)
+                        if spot_ratio < 0.3 and ondemand_cost > 100:  # Less than 30% spot, significant on-demand
+                            event_data = {
+                                'date': date,
+                                'spot_ratio': spot_ratio,
+                                'ondemand_spike': ondemand_cost,
+                                'secondary_impacts': {}
+                            }
+                            
+                            # Check secondary service impacts
+                            for service in secondary_services:
+                                if service in secondary_daily_costs and date in secondary_daily_costs[service]:
+                                    secondary_cost = secondary_daily_costs[service][date]
+                                    
+                                    # Calculate baseline for this service
+                                    service_costs = [secondary_daily_costs[service].get(d, 0) for d in sorted_dates]
+                                    service_avg = sum(service_costs) / len(service_costs) if service_costs else 0
+                                    
+                                    if service_avg > 0:
+                                        deviation = ((secondary_cost - service_avg) / service_avg) * 100
+                                        event_data['secondary_impacts'][service] = {
+                                            'cost': secondary_cost,
+                                            'baseline': service_avg,
+                                            'deviation': deviation
+                                        }
+                            
+                            impact_events.append(event_data)
+                
+                # Calculate service dependency scores
+                service_dependencies = {}
+                for service in secondary_services:
+                    if service in secondary_daily_costs:
+                        # Simple correlation calculation
+                        primary_values = [primary_daily_costs.get(date, 0) for date in sorted_dates]
+                        secondary_values = [secondary_daily_costs[service].get(date, 0) for date in sorted_dates]
+                        
+                        if len(primary_values) == len(secondary_values) and len(primary_values) > 3:
+                            # Calculate Pearson correlation coefficient (simplified)
+                            primary_mean = sum(primary_values) / len(primary_values)
+                            secondary_mean = sum(secondary_values) / len(secondary_values)
+                            
+                            numerator = sum((p - primary_mean) * (s - secondary_mean) 
+                                          for p, s in zip(primary_values, secondary_values))
+                            
+                            primary_sq = sum((p - primary_mean) ** 2 for p in primary_values)
+                            secondary_sq = sum((s - secondary_mean) ** 2 for s in secondary_values)
+                            
+                            if primary_sq > 0 and secondary_sq > 0:
+                                correlation = numerator / (primary_sq * secondary_sq) ** 0.5
+                                service_dependencies[service] = correlation
+                
+                output = ["🔗 **CROSS-SERVICE IMPACT ANALYSIS**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({correlation_period} days)")
+                output.append(f"🎯 **Primary Service**: {primary_service}")
+                output.append(f"🔍 **Secondary Services**: {len(secondary_services)} analyzed")
+                output.append(f"⚠️ **Impact Events Detected**: {len(impact_events)}")
+                
+                # Show service dependency matrix
+                if service_dependencies:
+                    output.append(f"\n📊 **SERVICE DEPENDENCY MATRIX**:")
+                    for service, correlation in sorted(service_dependencies.items(), key=lambda x: abs(x[1]), reverse=True):
+                        correlation_strength = "🔴 STRONG" if abs(correlation) > 0.7 else "🟡 MODERATE" if abs(correlation) > 0.4 else "🟢 WEAK"
+                        correlation_direction = "📈 Positive" if correlation > 0 else "📉 Negative"
+                        output.append(f"   • {service}: {correlation:.3f} ({correlation_strength}, {correlation_direction})")
+                
+                # Show impact events
+                if impact_events:
+                    output.append(f"\n🚨 **CAPACITY CONSTRAINT IMPACT EVENTS**:")
+                    total_secondary_impact = 0
+                    
+                    for i, event in enumerate(impact_events[-5:], 1):  # Show last 5 events
+                        output.append(f"\n{i}. **{event['date']}** (Spot ratio: {event['spot_ratio']:.1%})")
+                        output.append(f"     On-Demand spike: ${event['ondemand_spike']:.2f}")
+                        
+                        if event['secondary_impacts']:
+                            output.append(f"     Secondary service impacts:")
+                            for service, impact in event['secondary_impacts'].items():
+                                service_short = service.replace('Amazon ', '').replace('AWS ', '')
+                                impact_emoji = "📈" if impact['deviation'] > 0 else "📉"
+                                output.append(f"       {impact_emoji} {service_short}: {impact['deviation']:+.1f}% (${impact['cost']:.2f})")
+                                if impact['deviation'] > 0:
+                                    total_secondary_impact += impact['cost'] - impact['baseline']
+                
+                # Calculate cascading costs
+                if impact_events:
+                    primary_constraint_cost = sum(event['ondemand_spike'] for event in impact_events)
+                    secondary_spillover_cost = total_secondary_impact
+                    
+                    output.append(f"\n💰 **CASCADING COST IMPACT**:")
+                    output.append(f"   Primary service constraint cost: ${primary_constraint_cost:.2f}")
+                    output.append(f"   Secondary service spillover cost: ${secondary_spillover_cost:.2f}")
+                    output.append(f"   Total cascading impact: ${primary_constraint_cost + secondary_spillover_cost:.2f}")
+                    
+                    if primary_constraint_cost > 0:
+                        spillover_ratio = secondary_spillover_cost / primary_constraint_cost
+                        output.append(f"   Spillover multiplier: {spillover_ratio:.2f}x")
+                
+                # Recommendations
+                output.append(f"\n💡 **CROSS-SERVICE OPTIMIZATION RECOMMENDATIONS**:")
+                
+                high_correlation_services = [s for s, c in service_dependencies.items() if abs(c) > 0.5]
+                if high_correlation_services:
+                    output.append(f"   🔗 Monitor {len(high_correlation_services)} highly correlated services together")
+                    output.append(f"   📊 Set up unified alerting for correlated service cost spikes")
+                
+                if impact_events:
+                    output.append(f"   🎯 Implement capacity diversification to reduce constraint events")
+                    output.append(f"   ⚡ Use multi-AZ and multi-instance-type strategies")
+                    output.append(f"   📈 Consider Reserved Instances for baseline capacity")
+                
+                if total_secondary_impact > 100:
+                    output.append(f"   💰 Optimize secondary service configurations during constraints")
+                    output.append(f"   🔄 Implement auto-scaling policies that consider primary service capacity")
+                
+                output.append(f"   📊 Set up cross-service cost correlation monitoring")
+                output.append(f"   🚨 Create alerts for unusual cross-service cost patterns")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_cross_service_with_timeout(), timeout=75.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: Cross-service impact analysis took longer than 75 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing cross-service impact: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_savings_plan_spillover_analysis(
+        days: int = 14,
+        spot_services: Optional[List[str]] = None,
+        savings_plan_types: Optional[List[str]] = None,
+        account_id: Optional[str] = None,
+        region: Optional[str] = None
+    ) -> str:
+        """AWS Savings Plans: Track spillover when spot unavailability forces SP consumption."""
+        import asyncio
+        
+        if spot_services is None:
+            spot_services = ["Amazon Elastic Compute Cloud - Compute", "Amazon Elastic Container Service"]
+        
+        if savings_plan_types is None:
+            savings_plan_types = ["ComputeSavingsPlans", "EC2InstanceSavingsPlans"]
+        
+        logger.info(f"💰 Analyzing Savings Plan spillover for {days} days...")
+        
+        try:
+            async def analyze_spillover_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=days)
+                
+                # Get Savings Plans utilization
+                sp_response = ce_client.get_savings_plans_utilization(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY'
+                )
+                
+                # Get spot vs on-demand breakdown
+                spot_response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost', 'UsageQuantity'],
+                    GroupBy=[
+                        {'Type': 'DIMENSION', 'Key': 'PURCHASE_TYPE'},
+                        {'Type': 'DIMENSION', 'Key': 'SERVICE'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': spot_services,
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Process Savings Plans data
+                sp_utilization_data = {}
+                total_sp_commitment = 0.0
+                total_sp_used = 0.0
+                total_sp_unused = 0.0
+                
+                for result in sp_response.get('SavingsPlansUtilizationsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    util = result['Utilization']
+                    
+                    utilization_pct = float(util.get('UtilizationPercentage', 0))
+                    total_commitment = float(util.get('TotalCommitment', {}).get('Amount', 0))
+                    used_commitment = float(util.get('UsedCommitment', {}).get('Amount', 0))
+                    unused_commitment = float(util.get('UnusedCommitment', {}).get('Amount', 0))
+                    
+                    sp_utilization_data[date] = {
+                        'utilization': utilization_pct,
+                        'total_commitment': total_commitment,
+                        'used_commitment': used_commitment,
+                        'unused_commitment': unused_commitment
+                    }
+                    
+                    total_sp_commitment += total_commitment
+                    total_sp_used += used_commitment
+                    total_sp_unused += unused_commitment
+                
+                # Process spot/on-demand data
+                daily_purchase_data = {}
+                spot_constraint_events = []
+                
+                for result in spot_response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    daily_purchase_data[date] = {
+                        'spot_cost': 0.0,
+                        'ondemand_cost': 0.0,
+                        'sp_cost': 0.0,
+                        'total_cost': 0.0
+                    }
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 2:
+                            purchase_type = keys[0]
+                            service = keys[1]
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            
+                            daily_purchase_data[date]['total_cost'] += cost
+                            
+                            if 'Spot' in purchase_type:
+                                daily_purchase_data[date]['spot_cost'] += cost
+                            elif 'On Demand' in purchase_type:
+                                daily_purchase_data[date]['ondemand_cost'] += cost
+                            elif 'Savings Plan' in purchase_type:
+                                daily_purchase_data[date]['sp_cost'] += cost
+                
+                # Identify spillover events
+                spillover_events = []
+                for date in sorted(daily_purchase_data.keys()):
+                    purchase_data = daily_purchase_data[date]
+                    sp_data = sp_utilization_data.get(date, {})
+                    
+                    total_cost = purchase_data['total_cost']
+                    spot_cost = purchase_data['spot_cost']
+                    ondemand_cost = purchase_data['ondemand_cost']
+                    sp_utilization = sp_data.get('utilization', 0)
+                    
+                    if total_cost > 0:
+                        spot_ratio = spot_cost / total_cost
+                        
+                        # Detect potential spillover: low spot ratio + high SP utilization
+                        if spot_ratio < 0.4 and sp_utilization > 85:  # Less than 40% spot, >85% SP utilization
+                            spillover_events.append({
+                                'date': date,
+                                'spot_ratio': spot_ratio,
+                                'sp_utilization': sp_utilization,
+                                'ondemand_cost': ondemand_cost,
+                                'sp_unused': sp_data.get('unused_commitment', 0),
+                                'estimated_spillover': max(0, ondemand_cost - spot_cost)
+                            })
+                
+                # Calculate efficiency metrics
+                avg_sp_utilization = sum(data.get('utilization', 0) for data in sp_utilization_data.values()) / len(sp_utilization_data) if sp_utilization_data else 0
+                total_spillover_cost = sum(event['estimated_spillover'] for event in spillover_events)
+                efficiency_loss = total_sp_unused / total_sp_commitment * 100 if total_sp_commitment > 0 else 0
+                
+                output = ["💰 **SAVINGS PLAN SPILLOVER ANALYSIS**", "=" * 60]
+                output.append(f"📅 **Period**: {start_date} to {end_date} ({days} days)")
+                output.append(f"📊 **Average SP Utilization**: {avg_sp_utilization:.1f}%")
+                output.append(f"💸 **Total SP Commitment**: ${total_sp_commitment:.2f}")
+                output.append(f"✅ **Total SP Used**: ${total_sp_used:.2f}")
+                output.append(f"❌ **Total SP Unused**: ${total_sp_unused:.2f}")
+                output.append(f"📉 **Efficiency Loss**: {efficiency_loss:.1f}%")
+                
+                # Show spillover events
+                if spillover_events:
+                    output.append(f"\n🚨 **SPILLOVER EVENTS DETECTED** ({len(spillover_events)} events):")
+                    output.append(f"💰 **Total Estimated Spillover Cost**: ${total_spillover_cost:.2f}")
+                    
+                    for i, event in enumerate(spillover_events[-5:], 1):  # Show last 5 events
+                        output.append(f"\n{i}. **{event['date']}**:")
+                        output.append(f"     Spot ratio: {event['spot_ratio']:.1%} (constraint detected)")
+                        output.append(f"     SP utilization: {event['sp_utilization']:.1f}% (high pressure)")
+                        output.append(f"     On-Demand cost: ${event['ondemand_cost']:.2f}")
+                        output.append(f"     Estimated spillover: ${event['estimated_spillover']:.2f}")
+                        if event['sp_unused'] > 0:
+                            output.append(f"     SP unused: ${event['sp_unused']:.2f}")
+                
+                # Utilization efficiency analysis
+                high_util_days = [date for date, data in sp_utilization_data.items() if data.get('utilization', 0) > 90]
+                low_util_days = [date for date, data in sp_utilization_data.items() if data.get('utilization', 0) < 70]
+                
+                output.append(f"\n📊 **UTILIZATION EFFICIENCY BREAKDOWN**:")
+                output.append(f"   🔴 High utilization days (>90%): {len(high_util_days)}")
+                output.append(f"   🟢 Optimal utilization days (70-90%): {len(sp_utilization_data) - len(high_util_days) - len(low_util_days)}")
+                output.append(f"   🟡 Low utilization days (<70%): {len(low_util_days)}")
+                
+                if high_util_days:
+                    output.append(f"\n🔴 **HIGH UTILIZATION PRESSURE DAYS**:")
+                    for date in high_util_days[-5:]:
+                        util_data = sp_utilization_data[date]
+                        output.append(f"   {date}: {util_data['utilization']:.1f}% (unused: ${util_data['unused_commitment']:.2f})")
+                
+                # Opportunity cost analysis
+                if spillover_events and total_sp_unused > 0:
+                    opportunity_cost = total_sp_unused  # Unused SP commitment is direct opportunity cost
+                    spillover_vs_opportunity = total_spillover_cost / opportunity_cost if opportunity_cost > 0 else 0
+                    
+                    output.append(f"\n💡 **OPPORTUNITY COST ANALYSIS**:")
+                    output.append(f"   Unused SP commitment (opportunity cost): ${opportunity_cost:.2f}")
+                    output.append(f"   Spillover cost from constraints: ${total_spillover_cost:.2f}")
+                    output.append(f"   Spillover vs opportunity ratio: {spillover_vs_opportunity:.2f}x")
+                    
+                    if spillover_vs_opportunity > 1:
+                        output.append(f"   🔴 ALERT: Spillover cost exceeds unused commitment waste")
+                    else:
+                        output.append(f"   🟢 Spillover cost is less than unused commitment waste")
+                
+                # Recommendations
+                output.append(f"\n💡 **SAVINGS PLAN OPTIMIZATION RECOMMENDATIONS**:")
+                
+                if len(spillover_events) > days * 0.2:  # More than 20% of days have spillover
+                    output.append(f"   🎯 High spillover frequency: Consider increasing SP commitment")
+                    additional_commitment = total_spillover_cost / days * 30  # Monthly estimate
+                    output.append(f"   📈 Potential additional commitment: ${additional_commitment:.2f}/month")
+                
+                if efficiency_loss > 20:
+                    output.append(f"   📉 High unused commitment: Consider reducing SP commitment")
+                    reduction_potential = total_sp_unused / days * 30  # Monthly estimate
+                    output.append(f"   📉 Potential commitment reduction: ${reduction_potential:.2f}/month")
+                
+                if spillover_events:
+                    output.append(f"   ⚡ Improve spot instance diversification to reduce constraints")
+                    output.append(f"   🔄 Implement mixed instance type strategies")
+                    output.append(f"   📍 Use multiple AZs and regions for better spot availability")
+                
+                output.append(f"   📊 Monitor SP utilization trends and adjust commitments quarterly")
+                output.append(f"   🎯 Target 80-90% SP utilization for optimal efficiency")
+                output.append(f"   🚨 Set up alerts for >95% SP utilization (spillover risk)")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_spillover_with_timeout(), timeout=60.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: Savings Plan spillover analysis took longer than 60 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing Savings Plan spillover: {str(e)}"
+    
+    @mcp.tool()
+    async def aws_instance_type_capacity_strategy(
+        current_types: Optional[List[str]] = None,
+        region: Optional[str] = None,
+        capacity_requirements: Optional[Dict[str, Any]] = None,
+        risk_tolerance: str = "medium",
+        account_id: Optional[str] = None
+    ) -> str:
+        """AWS Instance Strategy: Recommend diversification strategies and capacity planning."""
+        import asyncio
+        
+        if current_types is None:
+            current_types = []  # Will be discovered from actual usage
+        
+        if capacity_requirements is None:
+            capacity_requirements = {"vcpu": 100, "memory": 400, "baseline_hours": 168}  # Weekly baseline
+        
+        logger.info(f"🎯 Analyzing instance type capacity strategy...")
+        
+        try:
+            async def analyze_capacity_strategy_with_timeout():
+                ce_client = aws_provider.get_client("ce", account_id, region)
+                
+                end_date = datetime.now().date()
+                start_date = end_date - timedelta(days=14)  # 2 weeks of data
+                
+                # Get current instance type usage
+                response = ce_client.get_cost_and_usage(
+                    TimePeriod={
+                        'Start': start_date.strftime('%Y-%m-%d'),
+                        'End': end_date.strftime('%Y-%m-%d')
+                    },
+                    Granularity='DAILY',
+                    Metrics=['BlendedCost', 'UsageQuantity'],
+                    GroupBy=[
+                        {'Type': 'DIMENSION', 'Key': 'INSTANCE_TYPE'},
+                        {'Type': 'DIMENSION', 'Key': 'PURCHASE_TYPE'},
+                        {'Type': 'DIMENSION', 'Key': 'AVAILABILITY_ZONE'}
+                    ],
+                    Filter={
+                        'Dimensions': {
+                            'Key': 'SERVICE',
+                            'Values': ['Amazon Elastic Compute Cloud - Compute'],
+                            'MatchOptions': ['EQUALS']
+                        }
+                    }
+                )
+                
+                # Process current usage data
+                instance_usage = {}
+                az_usage = {}
+                purchase_type_usage = {}
+                daily_costs = {}
+                
+                for result in response.get('ResultsByTime', []):
+                    date = result['TimePeriod']['Start']
+                    daily_costs[date] = 0.0
+                    
+                    for group in result.get('Groups', []):
+                        keys = group.get('Keys', [])
+                        if len(keys) >= 3:
+                            instance_type = keys[0]
+                            purchase_type = keys[1]
+                            az = keys[2]
+                            
+                            cost = float(group.get('Metrics', {}).get('BlendedCost', {}).get('Amount', 0))
+                            usage = float(group.get('Metrics', {}).get('UsageQuantity', {}).get('Amount', 0))
+                            
+                            daily_costs[date] += cost
+                            
+                            # Track instance type usage
+                            if instance_type not in instance_usage:
+                                instance_usage[instance_type] = {
+                                    'total_cost': 0, 'total_usage': 0, 'spot_cost': 0, 
+                                    'ondemand_cost': 0, 'days_used': 0, 'azs': set()
+                                }
+                            
+                            instance_usage[instance_type]['total_cost'] += cost
+                            instance_usage[instance_type]['total_usage'] += usage
+                            instance_usage[instance_type]['azs'].add(az)
+                            
+                            if cost > 0:
+                                instance_usage[instance_type]['days_used'] += 1
+                            
+                            if 'Spot' in purchase_type:
+                                instance_usage[instance_type]['spot_cost'] += cost
+                            elif 'On Demand' in purchase_type:
+                                instance_usage[instance_type]['ondemand_cost'] += cost
+                            
+                            # Track AZ distribution
+                            if az not in az_usage:
+                                az_usage[az] = 0
+                            az_usage[az] += cost
+                            
+                            # Track purchase type distribution
+                            if purchase_type not in purchase_type_usage:
+                                purchase_type_usage[purchase_type] = 0
+                            purchase_type_usage[purchase_type] += cost
+                
+                # Analyze current portfolio
+                total_cost = sum(data['total_cost'] for data in instance_usage.values())
+                used_instance_types = [it for it, data in instance_usage.items() if data['total_cost'] > 1]
+                
+                # Instance type diversity analysis
+                instance_families = {}
+                for instance_type in used_instance_types:
+                    family = instance_type.split('.')[0] if '.' in instance_type else instance_type
+                    if family not in instance_families:
+                        instance_families[family] = {'types': [], 'cost': 0}
+                    instance_families[family]['types'].append(instance_type)
+                    instance_families[family]['cost'] += instance_usage[instance_type]['total_cost']
+                
+                # Calculate risk metrics
+                family_concentration = len(instance_families)
+                type_concentration = len(used_instance_types)
+                az_concentration = len(az_usage)
+                
+                # Spot vs On-Demand ratio
+                total_spot = sum(data['spot_cost'] for data in instance_usage.values())
+                total_ondemand = sum(data['ondemand_cost'] for data in instance_usage.values())
+                spot_ratio = total_spot / (total_spot + total_ondemand) if (total_spot + total_ondemand) > 0 else 0
+                
+                output = ["🎯 **INSTANCE TYPE CAPACITY STRATEGY**", "=" * 60]
+                output.append(f"📅 **Analysis Period**: {start_date} to {end_date} (14 days)")
+                output.append(f"💰 **Total Compute Cost**: ${total_cost:.2f}")
+                output.append(f"🏗️ **Instance Families Used**: {family_concentration}")
+                output.append(f"📊 **Instance Types Used**: {type_concentration}")
+                output.append(f"📍 **Availability Zones**: {az_concentration}")
+                output.append(f"⚡ **Spot Ratio**: {spot_ratio:.1%}")
+                
+                # Current portfolio analysis
+                output.append(f"\n📊 **CURRENT INSTANCE PORTFOLIO**:")
+                sorted_instances = sorted(instance_usage.items(), key=lambda x: x[1]['total_cost'], reverse=True)
+                
+                for i, (instance_type, data) in enumerate(sorted_instances[:10], 1):
+                    cost_pct = (data['total_cost'] / total_cost * 100) if total_cost > 0 else 0
+                    spot_pct = (data['spot_cost'] / data['total_cost'] * 100) if data['total_cost'] > 0 else 0
+                    az_count = len(data['azs'])
+                    
+                    output.append(f"{i:2d}. **{instance_type}**: ${data['total_cost']:.2f} ({cost_pct:.1f}%)")
+                    output.append(f"     Spot: {spot_pct:.0f}% | AZs: {az_count} | Days used: {data['days_used']}")
+                
+                # Risk assessment
+                risk_factors = []
+                risk_score = 0
+                
+                if family_concentration < 3:
+                    risk_factors.append(f"🔴 Low family diversity ({family_concentration} families)")
+                    risk_score += 3
+                elif family_concentration < 5:
+                    risk_factors.append(f"🟡 Moderate family diversity ({family_concentration} families)")
+                    risk_score += 1
+                
+                if type_concentration < 5:
+                    risk_factors.append(f"🔴 Low type diversity ({type_concentration} types)")
+                    risk_score += 3
+                elif type_concentration < 10:
+                    risk_factors.append(f"🟡 Moderate type diversity ({type_concentration} types)")
+                    risk_score += 1
+                
+                if az_concentration < 2:
+                    risk_factors.append(f"🔴 Single AZ risk ({az_concentration} AZ)")
+                    risk_score += 4
+                elif az_concentration < 3:
+                    risk_factors.append(f"🟡 Limited AZ diversity ({az_concentration} AZs)")
+                    risk_score += 1
+                
+                if spot_ratio > 0.8:
+                    risk_factors.append(f"🔴 High spot dependency ({spot_ratio:.1%})")
+                    risk_score += 2
+                elif spot_ratio < 0.3:
+                    risk_factors.append(f"🟡 Low spot utilization ({spot_ratio:.1%})")
+                    risk_score += 1
+                
+                # Concentration risk
+                top_instance_pct = (sorted_instances[0][1]['total_cost'] / total_cost * 100) if sorted_instances else 0
+                if top_instance_pct > 50:
+                    risk_factors.append(f"🔴 High instance concentration ({top_instance_pct:.1f}% on {sorted_instances[0][0]})")
+                    risk_score += 3
+                
+                output.append(f"\n⚠️ **CAPACITY RISK ASSESSMENT** (Score: {risk_score}/15):")
+                if risk_score <= 3:
+                    output.append(f"🟢 **LOW RISK**: Well-diversified capacity strategy")
+                elif risk_score <= 7:
+                    output.append(f"🟡 **MEDIUM RISK**: Some optimization opportunities")
+                else:
+                    output.append(f"🔴 **HIGH RISK**: Significant capacity constraints possible")
+                
+                for factor in risk_factors:
+                    output.append(f"   {factor}")
+                
+                # Diversification recommendations
+                output.append(f"\n💡 **DIVERSIFICATION STRATEGY RECOMMENDATIONS**:")
+                
+                # Instance family recommendations
+                current_families = set(instance_families.keys())
+                recommended_families = ['m5', 'm6i', 'c5', 'c6i', 'r5', 'r6i']
+                missing_families = [f for f in recommended_families if f not in current_families]
+                
+                if missing_families:
+                    output.append(f"   🏗️ **Add Instance Families**: {', '.join(missing_families[:3])}")
+                    output.append(f"     Benefits: Better capacity availability, cost optimization")
+                
+                # AZ diversification
+                if az_concentration < 3:
+                    output.append(f"   📍 **Expand to 3+ Availability Zones**")
+                    output.append(f"     Current: {az_concentration} AZs | Target: 3+ AZs")
+                    output.append(f"     Benefits: Reduced capacity constraint risk")
+                
+                # Spot strategy optimization
+                if spot_ratio < 0.5:
+                    target_spot_savings = (total_ondemand * 0.3) * 0.7  # 30% more spot at 70% savings
+                    output.append(f"   ⚡ **Increase Spot Usage**: Target 50-70% spot ratio")
+                    output.append(f"     Potential monthly savings: ${target_spot_savings:.2f}")
+                
+                # Instance type mix recommendations
+                if risk_tolerance == "low":
+                    recommended_types = 8
+                    spot_target = 40
+                elif risk_tolerance == "high":
+                    recommended_types = 15
+                    spot_target = 80
+                else:  # medium
+                    recommended_types = 12
+                    spot_target = 60
+                
+                if type_concentration < recommended_types:
+                    output.append(f"   📊 **Diversify Instance Types**: Target {recommended_types}+ types")
+                    output.append(f"     Current: {type_concentration} | Risk tolerance: {risk_tolerance}")
+                
+                # Cost projections
+                current_daily_avg = total_cost / 14
+                output.append(f"\n💰 **OPTIMIZATION PROJECTIONS** (based on ${current_daily_avg:.2f}/day):")
+                
+                if spot_ratio < 0.5:
+                    spot_savings = current_daily_avg * (0.5 - spot_ratio) * 0.7
+                    output.append(f"   ⚡ Spot optimization: ${spot_savings:.2f}/day savings potential")
+                
+                if family_concentration < 4:
+                    capacity_savings = current_daily_avg * 0.1  # 10% from better capacity availability
+                    output.append(f"   🏗️ Family diversification: ${capacity_savings:.2f}/day constraint avoidance")
+                
+                # Implementation roadmap
+                output.append(f"\n🗺️ **IMPLEMENTATION ROADMAP**:")
+                output.append(f"   📅 **Week 1-2**: Audit current instance utilization patterns")
+                output.append(f"   📅 **Week 3-4**: Test {', '.join(missing_families[:2])} families in non-critical workloads")
+                output.append(f"   📅 **Month 2**: Gradually increase spot ratio to {spot_target}%")
+                output.append(f"   📅 **Month 3**: Expand to 3+ AZs with load balancing")
+                output.append(f"   📅 **Ongoing**: Monitor capacity metrics and adjust mix quarterly")
+                
+                # Monitoring recommendations
+                output.append(f"\n📊 **MONITORING SETUP**:")
+                output.append(f"   🚨 Set up spot interruption rate alerts (>10%)")
+                output.append(f"   📈 Monitor instance type capacity availability by AZ")
+                output.append(f"   💰 Track cost impact of capacity constraints")
+                output.append(f"   🎯 Review and adjust strategy monthly")
+                
+                return "\n".join(output)
+            
+            result = await asyncio.wait_for(analyze_capacity_strategy_with_timeout(), timeout=60.0)
+            return result
+            
+        except asyncio.TimeoutError:
+            return f"⏰ Timeout: Instance type capacity strategy analysis took longer than 60 seconds"
+        except Exception as e:
+            return f"❌ Error analyzing instance type capacity strategy: {str(e)}"
