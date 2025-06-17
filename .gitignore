@@ -84,3 +84,4 @@ claude_desktop_config.json
 temp/
 tmp/
 *.tmp
+prompt.md
