@@ -1086,7 +1086,7 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
             return f"❌ Error analyzing by {tag_key} tag: {str(e)}"
 
     @mcp.tool()
-    async def aws_cost_explorer_analyze_specific_resource(
+    async def aws_analyze_resource(
         name_tag_value: str,
         days: int = 7,
         account_id: Optional[str] = None,

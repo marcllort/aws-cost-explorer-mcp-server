@@ -804,36 +804,16 @@ if __name__ == "__main__":
         
         # Ensure mcp section exists
         if "mcp" not in cursor_config:
-            cursor_config["mcp"] = {"servers": {}}
-        elif "servers" not in cursor_config["mcp"]:
-            cursor_config["mcp"]["servers"] = {}
+            cursor_config["mcp"] = {"enabled": True}
         
-        # Add each endpoint
-        for endpoint_id, config in endpoints.items():
-            server_name = f"autocost-{endpoint_id}"
-            
-            # Use wrapper script if pre-run commands exist, otherwise use main script
-            if config.get("pre_run_commands"):
-                command_script = str(self.project_root / "scripts" / f"run_{endpoint_id}.py")
-                args = []  # Wrapper script handles the endpoint argument
-            else:
-                command_script = str(self.project_root / "main.py")
-                args = ["--endpoint", endpoint_id]
-            
-            cursor_config["mcp"]["servers"][server_name] = {
-                "command": self.get_python_executable(),
-                "args": [command_script] + args,
-                "env": {
-                    "AUTOCOST_ENDPOINT": endpoint_id,
-                    "AUTOCOST_PROVIDERS": ",".join(config["providers"])
-                }
-            }
-        
-        # Save configuration
+        # Save settings.json
         with open(config_path, 'w') as f:
             json.dump(cursor_config, f, indent=2)
         
-        self.console.print(f"✅ Cursor configured at: {config_path}", style="green")
+        self.console.print(f"✅ Cursor settings configured at: {config_path}", style="green")
+        
+        # Create mcp.json configuration
+        self.create_cursor_mcp_config(endpoints)
         
         # Show restart instructions
         endpoint_info = []
@@ -848,6 +828,81 @@ if __name__ == "__main__":
             title="🔄 Cursor Setup Complete",
             style="green"
         ))
+
+    def create_cursor_mcp_config(self, endpoints: Dict[str, Dict]):
+        """Create the mcp.json file for Cursor integration."""
+        # Get the platform-specific config directory
+        platform_name = platform.system().lower()
+        if platform_name == "darwin":
+            mcp_config_dir = Path.home() / ".cursor"
+        elif platform_name == "windows":
+            mcp_config_dir = Path.home() / "AppData" / "Roaming" / "Cursor"
+        else:  # linux
+            mcp_config_dir = Path.home() / ".config" / "cursor"
+            
+        mcp_config_dir.mkdir(parents=True, exist_ok=True)
+        mcp_config_file = mcp_config_dir / "mcp.json"
+        
+        # Load existing config or create new
+        mcp_config = {"mcpServers": {}}
+        if mcp_config_file.exists():
+            try:
+                mcp_config = json.loads(mcp_config_file.read_text())
+                if "mcpServers" not in mcp_config:
+                    mcp_config["mcpServers"] = {}
+            except json.JSONDecodeError:
+                self.console.print("⚠️ Existing mcp.json is invalid, creating new", style="yellow")
+                mcp_config = {"mcpServers": {}}
+        
+        # Add each endpoint
+        for endpoint_id, config in endpoints.items():
+            server_name = f"aws-cost-explorer"  # Use consistent server name
+            
+            # Use wrapper script if pre-run commands exist, otherwise use main script
+            if config.get("pre_run_commands"):
+                command_script = str(self.project_root / "scripts" / f"run_{endpoint_id}.py")
+                args = []  # Wrapper script handles the endpoint argument
+            else:
+                command_script = str(self.project_root / "server_manual.py")
+                args = []
+            
+            mcp_config["mcpServers"][server_name] = {
+                "command": str(self.project_root / "venv/bin/python"),
+                "args": [str(command_script)],
+                "env": {
+                    "AUTOCOST_PROVIDERS": ",".join(config["providers"]),
+                    "AUTOCOST_ENDPOINT": "manual",
+                    "AUTOCOST_ENABLE_CUSTOM_TOOLS": "true",
+                    "PYTHONPATH": str(self.project_root),
+                    "VIRTUAL_ENV": str(self.project_root / "venv")
+                },
+                "cwd": str(self.project_root)
+            }
+        
+        # Save configuration
+        try:
+            mcp_config_file.write_text(json.dumps(mcp_config, indent=2))
+            self.console.print(f"✅ Created Cursor MCP config at: {mcp_config_file}", style="green")
+            
+            # Show summary
+            self.console.print("\n📋 **CURSOR MCP CONFIGURATIONS:**")
+            for endpoint_id, config in endpoints.items():
+                server_name = "aws-cost-explorer"  # Use consistent server name
+                providers = ", ".join(config["providers"])
+                self.console.print(f"• **{server_name}**: {providers}")
+            
+            # Show restart instruction
+            self.console.print(f"\n🔄 **RESTART CURSOR** to load new configurations")
+            
+        except Exception as e:
+            self.console.print(f"❌ Error saving Cursor MCP config: {e}", style="red")
+            self.console.print(f"💡 Manual path: {mcp_config_file}")
+            
+            # Show manual configuration
+            self.console.print("\n📝 **MANUAL CONFIGURATION:**")
+            config_json = json.dumps(mcp_config, indent=2)
+            syntax = Syntax(config_json, "json", theme="monokai", line_numbers=True)
+            self.console.print(syntax)
 
     def save_configuration(self, providers_config: Dict[str, bool], endpoints: Dict[str, Dict]):
         """Save configuration to .env file and endpoint configs."""

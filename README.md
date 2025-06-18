@@ -95,6 +95,116 @@ export AUTOCOST_ENABLE_CUSTOM_TOOLS="true"   # Enable advanced cost analysis too
 export AUTOCOST_ENABLE_CUSTOM_TOOLS="false"  # Disable custom tools (basic tools only)
 ```
 
+### Cursor Integration
+
+#### Virtual Environment Setup
+
+For Cursor integration to work properly, you need to set up a dedicated virtual environment. Follow these steps:
+
+1. **Create and activate virtual environment:**
+   ```bash
+   # Create a new virtual environment in the project directory
+   python -m venv venv
+   
+   # Activate the virtual environment
+   # On macOS/Linux:
+   source venv/bin/activate
+   # On Windows:
+   .\venv\Scripts\activate
+   ```
+
+2. **Install dependencies in the virtual environment:**
+   ```bash
+   # Make sure you're in the project root directory
+   pip install -e .  # Install the project in editable mode
+   pip install mcp   # Install the MCP package
+   ```
+
+3. **Configure Cursor to use the virtual environment:**
+   Make sure your `~/.cursor/mcp.json` points to the virtual environment's Python:
+   ```json
+   {
+     "mcpServers": {
+       "aws-cost-explorer": {
+         "command": "/path/to/your/project/venv/bin/python",
+         "args": ["/path/to/your/project/server_manual.py"],
+         "env": {
+           "AUTOCOST_PROVIDERS": "aws",
+           "AUTOCOST_ENDPOINT": "manual",
+           "AUTOCOST_ENABLE_CUSTOM_TOOLS": "true",
+           "PYTHONPATH": "/path/to/your/project",
+           "VIRTUAL_ENV": "/path/to/your/project/venv"
+         },
+         "cwd": "/path/to/your/project"
+       }
+     }
+   }
+   ```
+
+4. **Verify the setup:**
+   ```bash
+   # Make sure you're in the virtual environment
+   source venv/bin/activate
+   
+   # Test the server
+   python server_manual.py --test
+   ```
+
+5. **Important Notes:**
+   - The virtual environment must be created in the project directory
+   - Always use absolute paths in the Cursor configuration
+   - If you close Cursor, you may need to restart it to reconnect to the MCP server
+   - If you see "0 tools enabled", make sure:
+     - The virtual environment is active
+     - All dependencies are installed in the virtual environment
+     - The paths in `mcp.json` are correct and absolute
+     - The server is running (check with `--test` flag)
+
+The setup script automatically configures Cursor integration by:
+
+1. **Creating `settings.json`**: Enables MCP integration in Cursor
+   - Location: 
+     - macOS: `~/Library/Application Support/Cursor/User/settings.json`
+     - Linux: `~/.config/cursor/User/settings.json`
+     - Windows: `~/AppData/Roaming/Cursor/User/settings.json`
+
+2. **Creating `mcp.json`**: Configures MCP servers for each endpoint
+   - Location:
+     - macOS: `~/.cursor/mcp.json`
+     - Linux: `~/.config/cursor/mcp.json`
+     - Windows: `~/AppData/Roaming/Cursor/mcp.json`
+   - Contains:
+     - Server configurations for each endpoint
+     - Environment variables for provider selection
+     - Command and arguments for server startup
+
+Example `mcp.json` configuration:
+```json
+{
+  "autocost-aws": {
+    "command": "/path/to/python",
+    "args": ["/path/to/server_manual.py"],
+    "env": {
+      "AUTOCOST_ENDPOINT": "aws",
+      "AUTOCOST_PROVIDERS": "aws"
+    }
+  },
+  "autocost-unified": {
+    "command": "/path/to/python",
+    "args": ["/path/to/server_manual.py"],
+    "env": {
+      "AUTOCOST_ENDPOINT": "unified",
+      "AUTOCOST_PROVIDERS": "aws,gcp"
+    }
+  }
+}
+```
+
+After configuration:
+1. Restart Cursor to load the new MCP servers
+2. The Autocost Controller tools will be available in Cursor's AI features
+3. Each endpoint appears as a separate MCP server in Cursor
+
 ### Claude Desktop Configurations
 
 The setup script creates multiple configurations in Claude Desktop:

@@ -3,7 +3,7 @@ name = "autocost-controller"
 version = "1.0.0"
 description = "Multi-Cloud Cost Analysis and Optimization Controller with MCP Integration"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 authors = [
     {name = "Autocost Controller Team"}
 ]
