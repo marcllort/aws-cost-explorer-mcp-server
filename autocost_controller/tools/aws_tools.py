@@ -1223,4 +1223,119 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
             
         except Exception as e:
             logger.error(f"Error analyzing specific resource: {str(e)}")
-            return f"❌ Error analyzing specific resource: {str(e)}" 
+            return f"❌ Error analyzing specific resource: {str(e)}"
+
+    @mcp.tool()
+    async def aws_refresh_credentials() -> str:
+        """Refresh AWS credentials from environment and test connection."""
+        logger.info("🔄 Refreshing AWS credentials...")
+        
+        try:
+            # Clear any cached clients
+            aws_provider._clients.clear()
+            
+            # Try to refresh from environment
+            if aws_provider.refresh_credentials_from_environment():
+                # Re-validate configuration
+                status = aws_provider.validate_configuration()
+                
+                if status.status == "ready":
+                    return f"✅ AWS credentials refreshed successfully!\n\nAccount: {status.last_check}\nCapabilities: {', '.join(status.capabilities)}"
+                else:
+                    return f"❌ Credentials refreshed but validation failed: {status.error_message}"
+            else:
+                return "❌ Failed to refresh credentials from environment. Make sure AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN (if applicable) are set."
+                
+        except Exception as e:
+            logger.error(f"Error refreshing AWS credentials: {str(e)}", "aws")
+            return f"❌ Error refreshing credentials: {str(e)}"
+
+    @mcp.tool()
+    async def aws_test_connection() -> str:
+        """Test AWS connection and show current identity."""
+        logger.info("🧪 Testing AWS connection...")
+        
+        try:
+            # Get current AWS identity
+            import boto3
+            
+            # Use current profile if set
+            if hasattr(aws_provider, '_current_profile') and aws_provider._current_profile:
+                session = boto3.Session(profile_name=aws_provider._current_profile)
+                sts_client = session.client('sts')
+                profile_info = f"Profile: {aws_provider._current_profile}"
+            else:
+                session = boto3.Session()
+                sts_client = session.client('sts')
+                profile_info = "Profile: default/environment"
+            
+            identity = sts_client.get_caller_identity()
+            
+            # Test Cost Explorer access
+            ce_client = session.client('ce')
+            
+            # Simple test call to verify permissions
+            from datetime import datetime, timedelta
+            end_date = datetime.now().date()
+            start_date = end_date - timedelta(days=1)
+            
+            ce_client.get_dimension_values(
+                TimePeriod={
+                    'Start': start_date.strftime('%Y-%m-%d'),
+                    'End': end_date.strftime('%Y-%m-%d')
+                },
+                Dimension='SERVICE',
+                Context='COST_AND_USAGE',
+                MaxResults=1
+            )
+            
+            return f"""✅ AWS Connection Test Successful!
+
+🔑 **Identity Information:**
+   Account ID: {identity['Account']}
+   User/Role ARN: {identity['Arn']}
+   User ID: {identity['UserId']}
+   {profile_info}
+   Region: {session.region_name or 'us-east-1'}
+
+🎯 **Permissions:**
+   ✅ STS (Identity verification)
+   ✅ Cost Explorer (Cost analysis)
+
+🚀 **Status:** Ready for cost analysis operations"""
+            
+        except Exception as e:
+            error_msg = str(e)
+            
+            if "ExpiredToken" in error_msg or "expired" in error_msg.lower():
+                return f"""❌ AWS Connection Test Failed - Expired Credentials
+
+**Error:** {error_msg}
+
+🔧 **Solution:** 
+1. Run the credential capture script in your terminal where you've assumed the role:
+   ```bash
+   python save_current_session.py
+   ```
+2. Then try this test again.
+
+💡 **Alternative:** If using profiles, switch to the correct profile:
+   - Use the aws_switch_profile tool
+   - Or set AWS_PROFILE environment variable"""
+            
+            elif "credentials" in error_msg.lower():
+                return f"""❌ AWS Connection Test Failed - No Credentials
+
+**Error:** {error_msg}
+
+🔧 **Solution:**
+1. Configure AWS credentials using one of:
+   - AWS CLI: `aws configure`
+   - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+   - IAM roles (if running on EC2)
+   - Assume a role and capture credentials with: `python save_current_session.py`
+
+2. Then try this test again."""
+            
+            else:
+                return f"❌ AWS Connection Test Failed: {error_msg}" 

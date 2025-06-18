@@ -19,6 +19,49 @@ from autocost_controller.core.logger import AutocostLogger
 from autocost_controller.core.provider_manager import ProviderManager
 from autocost_controller.tools import register_all_tools
 
+def capture_fresh_credentials():
+    """Capture fresh AWS credentials from current environment and save them."""
+    try:
+        # Test if current environment has working AWS credentials
+        import boto3
+        sts = boto3.client('sts')
+        identity = sts.get_caller_identity()
+        
+        print(f"✅ Found working AWS credentials in environment")
+        print(f"   Account: {identity['Account']}")
+        print(f"   Identity: {identity['Arn']}")
+        
+        # Get credentials from current session
+        session = boto3.Session()
+        credentials = session.get_credentials()
+        
+        if credentials:
+            frozen_credentials = credentials.get_frozen_credentials()
+            
+            # Save the working credentials
+            creds_data = {
+                'aws_access_key_id': frozen_credentials.access_key,
+                'aws_secret_access_key': frozen_credentials.secret_key,
+                'aws_region': session.region_name or os.environ.get('AWS_DEFAULT_REGION', 'us-east-1'),
+                'captured_at': identity['Arn'],
+                'account_id': identity['Account']
+            }
+            
+            if frozen_credentials.token:
+                creds_data['aws_session_token'] = frozen_credentials.token
+            
+            # Save to file for future use
+            creds_file = project_root / ".aws_credentials.json"
+            import json
+            creds_file.write_text(json.dumps(creds_data, indent=2))
+            
+            print(f"💾 Captured and saved fresh credentials to {creds_file}")
+            return True
+            
+    except Exception as e:
+        print(f"⚠️ Could not capture fresh credentials: {e}")
+        return False
+
 def load_saved_credentials():
     """Load saved AWS credentials if available."""
     creds_file = project_root / ".aws_credentials.json"
@@ -50,6 +93,28 @@ def load_saved_credentials():
         except Exception as e:
             print(f"⚠️ Could not load saved credentials: {e}")
             return False
+    return False
+
+def setup_aws_credentials():
+    """Setup AWS credentials with automatic detection and fallback."""
+    print("🔐 Setting up AWS credentials...")
+    
+    # First, try to capture fresh credentials from environment
+    if capture_fresh_credentials():
+        return True
+    
+    # If that fails, try to load saved credentials
+    print("🔄 Trying saved credentials...")
+    if load_saved_credentials():
+        print("✅ Loaded saved credentials")
+        return True
+    
+    print("⚠️ No working credentials found")
+    print("💡 To fix this:")
+    print("   1. In your terminal, assume your AWS role")
+    print("   2. Run: python save_current_session.py")
+    print("   3. Restart the MCP server")
+    
     return False
 
 def get_enabled_providers():
@@ -115,8 +180,8 @@ def main():
             print("  AUTOCOST_ENDPOINT     # Endpoint identifier (optional)")
             return
     
-    # Load saved credentials first
-    creds_loaded = load_saved_credentials()
+    # Setup AWS credentials with automatic detection
+    creds_ready = setup_aws_credentials()
     
     # Get enabled providers from environment
     enabled_providers = get_enabled_providers()
@@ -129,9 +194,7 @@ def main():
     print(f"🚀 Starting Autocost Controller MCP Server")
     print(f"🎯 Endpoint: {endpoint_name}")
     print(f"🔧 Enabled providers: {', '.join(enabled_providers)}")
-    
-    if creds_loaded:
-        print("✅ Loaded saved AWS credentials")
+    print(f"🔐 AWS credentials: {'✅ Ready' if creds_ready else '⚠️ Not ready'}")
     
     # Create FastMCP instance
     mcp = FastMCP("Autocost Controller")

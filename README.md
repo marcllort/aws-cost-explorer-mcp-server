@@ -104,6 +104,59 @@ The setup script creates multiple configurations in Claude Desktop:
 
 Each configuration is automatically optimized for its specific use case.
 
+## 🔐 AWS Credential Management
+
+The MCP server now includes **automatic credential detection** and multiple convenient ways to handle AWS credentials:
+
+### Automatic Credential Detection
+
+When the server starts, it automatically:
+1. 🔍 Checks for working AWS credentials in the current environment
+2. 💾 Captures and saves them if found
+3. 🔄 Falls back to previously saved credentials if needed
+
+### Quick Setup Options
+
+#### Option 1: Automatic with Current Session (Recommended)
+```bash
+# In your terminal where you've assumed the AWS role:
+python start_with_current_creds.py
+```
+This will capture your current credentials and start the server automatically.
+
+#### Option 2: Manual Credential Capture
+```bash
+# 1. In your terminal, assume your AWS role
+assume billing_read_only.root.okta
+
+# 2. Capture the session credentials
+python save_current_session.py
+
+# 3. Start the server (will auto-load the captured credentials)
+python server_manual.py
+```
+
+#### Option 3: Use AWS Profiles
+```bash
+# Set your AWS profile
+export AWS_PROFILE=your-profile-name
+python server_manual.py
+```
+
+### Troubleshooting Expired Credentials
+
+If you see "ExpiredToken" errors:
+1. The server will automatically detect this
+2. Use the `aws_test_connection` tool to check status
+3. Use the `aws_refresh_credentials` tool to refresh from environment
+4. Or restart with fresh credentials using Option 1 above
+
+### New MCP Tools for Credential Management
+
+- **`aws_test_connection`**: Test current AWS connection and show identity
+- **`aws_refresh_credentials`**: Refresh credentials from environment variables
+- **`get_provider_status`**: Check status of all providers
+
 ## 🔑 Authentication
 
 ### AWS Authentication Methods

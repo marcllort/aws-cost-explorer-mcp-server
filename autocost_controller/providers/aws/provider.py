@@ -146,17 +146,49 @@ class AWSProvider(BaseProvider):
                 'status': 'error'
             }
     
+    def refresh_credentials_from_environment(self) -> bool:
+        """Refresh AWS credentials from environment variables."""
+        try:
+            # Clear cached clients to force re-authentication
+            self._clients.clear()
+            
+            # Test if environment credentials work
+            test_session = boto3.Session()
+            sts_client = test_session.client('sts')
+            identity = sts_client.get_caller_identity()
+            
+            self.logger.info(f"✅ Refreshed AWS credentials from environment for account {identity['Account']}", "aws")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Failed to refresh credentials from environment: {str(e)}", "aws")
+            return False
+    
     def validate_configuration(self) -> ProviderStatus:
         """Validate AWS configuration and return status."""
         try:
+            # Clear any cached clients to ensure fresh authentication
+            if "ExpiredToken" in str(getattr(self, '_last_error', '')):
+                self._clients.clear()
+                self.logger.info("🔄 Clearing cached clients due to expired token", "aws")
+            
             # Check AWS credentials
             if self._current_profile:
                 session = boto3.Session(profile_name=self._current_profile)
                 sts_client = session.client('sts')
+                self.logger.debug(f"Using AWS profile: {self._current_profile}", "aws")
             else:
-                sts_client = boto3.client('sts')
+                # Use default session (environment variables or default profile)
+                session = boto3.Session()
+                sts_client = session.client('sts')
+                self.logger.debug("Using default AWS credentials (environment or default profile)", "aws")
                 
             identity = sts_client.get_caller_identity()
+            
+            # Log successful authentication
+            account_id = identity['Account']
+            user_arn = identity['Arn']
+            self.logger.info(f"✅ AWS authentication successful - Account: {account_id}, Identity: {user_arn}", "aws")
             
             capabilities = [
                 "cost_analysis",
@@ -178,11 +210,23 @@ class AWSProvider(BaseProvider):
             )
             
         except Exception as e:
+            # Store the error for potential cache clearing
+            self._last_error = str(e)
+            
             missing_config = []
-            if "credentials" in str(e).lower():
+            error_msg = str(e)
+            
+            if "credentials" in error_msg.lower() or "unable to locate credentials" in error_msg.lower():
                 missing_config.append("aws_credentials")
-            if "region" in str(e).lower():
+                self.logger.error("❌ AWS credentials not found or invalid", "aws")
+            elif "expiredtoken" in error_msg.lower() or "expired" in error_msg.lower():
+                missing_config.append("expired_credentials")
+                self.logger.error("❌ AWS credentials have expired", "aws")
+            elif "region" in error_msg.lower():
                 missing_config.append("aws_region")
+                self.logger.error("❌ AWS region not configured", "aws")
+            else:
+                self.logger.error(f"❌ AWS validation failed: {error_msg}", "aws")
             
             return ProviderStatus(
                 provider="aws",
@@ -190,7 +234,7 @@ class AWSProvider(BaseProvider):
                 is_configured=False,
                 missing_config=missing_config,
                 capabilities=[],
-                error_message=str(e),
+                error_message=error_msg,
                 last_check=datetime.now()
             )
     
