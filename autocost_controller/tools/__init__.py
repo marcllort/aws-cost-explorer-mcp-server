@@ -146,6 +146,21 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
                     except Exception:
                         output.append(f"   Profile: {current_profile or 'default'} (info unavailable)")
             
+            # Add GCP project information if GCP provider is ready
+            elif provider_name == "gcp" and status.status == "ready":
+                gcp_provider = provider_manager.get_provider("gcp")
+                if gcp_provider:
+                    current_project = gcp_provider.get_current_project()
+                    try:
+                        project_info = gcp_provider.get_project_info()
+                        output.append(f"   Project: {current_project or 'default'}")
+                        if project_info:
+                            output.append(f"   Name: {project_info.get('name', 'Unknown')}")
+                            output.append(f"   Number: {project_info.get('number', 'Unknown')}")
+                            output.append(f"   State: {project_info.get('state', 'Unknown')}")
+                    except Exception:
+                        output.append(f"   Project: {current_project or 'default'} (info unavailable)")
+            
             if status.capabilities:
                 output.append(f"   Capabilities: {', '.join(status.capabilities)}")
             
@@ -169,6 +184,16 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
                 output.append(f"   • AWS: Use `aws_profile_list()` to see profiles")
                 output.append(f"   • AWS: Use `aws_test_permissions()` to check access")
                 output.append(f"   • AWS: Use `aws_cost_explorer_analyze_by_service()` for cost analysis")
+            if any(k == "gcp" and v.status == "ready" for k, v in filtered_statuses.items()):
+                output.append(f"   • GCP: Use `gcp_project_list()` to see available projects")
+                output.append(f"   • GCP: Use `gcp_test_permissions()` to check access")
+                output.append(f"   • GCP: Use `gcp_project_info()` to see current project details")
+                output.append(f"   • GCP: Use `gcp_compute_cost_analysis()` for compute cost analysis")
+                output.append(f"   • GCP: Use `gcp_gke_cost_deep_dive()` for GKE cluster analysis")
+                output.append(f"   • GCP: Use `gcp_preemptible_instance_analysis()` for preemptible usage")
+                output.append(f"   • GCP: Use `gcp_project_cost_analysis()` for cost by labels/environments")
+                output.append(f"   • GCP: Use `gcp_committed_use_discount_analysis()` for CUD opportunities")
+                output.append(f"   • GCP: Use `gcp_cost_analysis_summary()` for comprehensive cost guidance")
         
         return "\n".join(output)
 
@@ -193,8 +218,22 @@ def register_aws_tools(mcp: FastMCP, provider_manager: ProviderManager, config: 
 
 
 def register_gcp_tools(mcp: FastMCP, provider_manager: ProviderManager, config: Config, logger: AutocostLogger) -> None:
-    """Register GCP-specific tools (placeholder)."""
-    logger.info("🔧 GCP tools registration - coming soon...")
+    """Register GCP-specific tools."""
+    logger.info("🔧 Registering GCP Cost Explorer tools...")
+    
+    # Import and register GCP tools
+    from .gcp_tools import register_gcp_tools as register_gcp_base_tools
+    from .gcp_cost_analysis import register_gcp_cost_analysis_tools
+    from .gcp_performance import register_gcp_performance_tools
+    
+    # Register basic GCP tools
+    register_gcp_base_tools(mcp, provider_manager, config, logger)
+    
+    # Register cost analysis tools
+    register_gcp_cost_analysis_tools(mcp, provider_manager, config, logger)
+    
+    # Register performance and optimization tools
+    register_gcp_performance_tools(mcp, provider_manager, config, logger)
 
 
 def register_azure_tools(mcp: FastMCP, provider_manager: ProviderManager, config: Config, logger: AutocostLogger) -> None:

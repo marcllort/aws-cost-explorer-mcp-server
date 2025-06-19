@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Autocost Controller Interactive Setup Script
+Autocost Controller - Interactive Setup & Auto-Installation
 
-Enhanced setup with auto-installation for Claude Desktop and Cursor,
-plus provider-specific endpoint configuration.
+This script provides an interactive setup wizard for configuring the
+multi-cloud cost analysis platform with auto-installation of dependencies.
 """
 
 import os
@@ -167,12 +167,12 @@ class AutocostSetup:
         if aws_enabled:
             self.configure_aws()
         
-        # GCP Configuration (placeholder)
-        gcp_enabled = Confirm.ask("🔵 Enable Google Cloud Platform? (Coming Soon)", default=False)
+        # GCP Configuration
+        gcp_enabled = Confirm.ask("🔵 Enable Google Cloud Platform?", default=True)
         providers_config["gcp"] = gcp_enabled
         
         if gcp_enabled:
-            self.console.print("🚧 GCP integration coming soon! Configuration saved for future use.", style="yellow")
+            self.configure_gcp()
         
         # Azure Configuration (placeholder)
         azure_enabled = Confirm.ask("🔷 Enable Microsoft Azure? (Coming Soon)", default=False)
@@ -226,13 +226,14 @@ class AutocostSetup:
             self.console.print("✅ AWS credentials configured successfully!", style="green")
             
             # Save current credentials for Claude Desktop
-            if Confirm.ask("💾 Save current credentials for Claude Desktop?", default=True):
+            if Confirm.ask("💾 Save current AWS credentials for future use?", default=True):
                 try:
-                    subprocess.run([sys.executable, "save_credentials.py"], 
+                    # Save AWS credentials specifically
+                    subprocess.run([sys.executable, "save_credentials.py", "--provider", "aws"], 
                                  cwd=self.project_root, check=True)
-                    self.console.print("✅ Credentials saved for Claude Desktop", style="green")
+                    self.console.print("✅ AWS credentials saved successfully", style="green")
                 except Exception as e:
-                    self.console.print(f"⚠️ Could not save credentials: {e}", style="yellow")
+                    self.console.print(f"⚠️ Could not save AWS credentials: {e}", style="yellow")
         else:
             self.console.print("❌ AWS credentials still not working", style="red")
 
@@ -438,6 +439,102 @@ source_profile = {source_profile}
         self.console.print("• For read-only cost analysis, these permissions are safe")
         self.console.print("• Consider using AWS managed policies like 'CostExplorerReadOnlyAccess'")
         self.console.print("• For cross-account access, ensure the role trusts your account")
+
+    def configure_gcp(self):
+        """Configure GCP with enhanced credential checking."""
+        self.console.print("\n🔵 GCP CONFIGURATION", style="bold blue")
+        
+        # Check for existing credentials
+        gcp_configured = self.check_gcp_credentials()
+        
+        if not gcp_configured:
+            self.console.print("❌ GCP credentials not found or invalid", style="red")
+            
+            setup_method = Prompt.ask(
+                "Choose GCP setup method",
+                choices=["application-default", "service-account", "skip"],
+                default="application-default"
+            )
+            
+            if setup_method == "application-default":
+                self.setup_gcp_application_default()
+            elif setup_method == "service-account":
+                self.setup_gcp_service_account()
+            elif setup_method == "skip":
+                self.console.print("⚠️ Skipping GCP setup. Configure manually later.", style="yellow")
+                return
+        
+        # Show required permissions
+        if Confirm.ask("📋 Show required GCP IAM permissions?", default=False):
+            self.show_gcp_iam_instructions()
+        
+        # Test credentials again
+        final_check = self.check_gcp_credentials()
+
+    def check_gcp_credentials(self) -> bool:
+        """Check if GCP credentials are configured and valid."""
+        try:
+            # Run the credential saving script
+            script_path = Path("save_credentials_gcp.py")
+            if not script_path.exists():
+                self.console.print("❌ GCP credential saving script not found", style="red")
+                return False
+            
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True
+            )
+            
+            if result.returncode == 0:
+                self.console.print("✅ GCP credentials are valid", style="green")
+                return True
+            else:
+                self.console.print(f"❌ GCP credential check failed: {result.stderr}", style="red")
+                return False
+                
+        except Exception as e:
+            self.console.print(f"❌ Error checking GCP credentials: {e}", style="red")
+            return False
+
+    def setup_gcp_application_default(self):
+        """Set up GCP using application default credentials."""
+        self.console.print("\n📝 Setting up GCP Application Default Credentials")
+        self.console.print("1. Install Google Cloud SDK if not already installed")
+        self.console.print("2. Run: gcloud auth application-default login")
+        self.console.print("3. Follow the browser authentication flow")
+        
+        if Confirm.ask("Have you completed these steps?"):
+            if self.check_gcp_credentials():
+                self.console.print("✅ GCP credentials configured successfully!", style="green")
+            else:
+                self.console.print("❌ GCP credential setup failed", style="red")
+
+    def setup_gcp_service_account(self):
+        """Set up GCP using a service account key file."""
+        self.console.print("\n📝 Setting up GCP Service Account")
+        self.console.print("1. Create a service account in GCP Console")
+        self.console.print("2. Grant required permissions")
+        self.console.print("3. Download the JSON key file")
+        
+        key_file = Prompt.ask("Enter path to service account key file")
+        if os.path.exists(key_file):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_file
+            if self.check_gcp_credentials():
+                self.console.print("✅ GCP credentials configured successfully!", style="green")
+            else:
+                self.console.print("❌ GCP credential setup failed", style="red")
+        else:
+            self.console.print("❌ Key file not found", style="red")
+
+    def show_gcp_iam_instructions(self):
+        """Show required GCP IAM permissions."""
+        self.console.print("\n📋 Required GCP IAM Permissions:")
+        self.console.print("Your service account needs these roles:")
+        self.console.print("• roles/billing.viewer")
+        self.console.print("• roles/monitoring.viewer")
+        self.console.print("• roles/bigquery.user")
+        self.console.print("• roles/resourcemanager.projectViewer")
 
     def configure_endpoints(self, providers_config: Dict[str, bool]) -> Dict[str, Dict]:
         """Configure provider-specific endpoints with environment variables."""
@@ -854,30 +951,46 @@ if __name__ == "__main__":
                 self.console.print("⚠️ Existing mcp.json is invalid, creating new", style="yellow")
                 mcp_config = {"mcpServers": {}}
         
-        # Add each endpoint
-        for endpoint_id, config in endpoints.items():
-            server_name = f"aws-cost-explorer"  # Use consistent server name
-            
-            # Use wrapper script if pre-run commands exist, otherwise use main script
-            if config.get("pre_run_commands"):
-                command_script = str(self.project_root / "scripts" / f"run_{endpoint_id}.py")
-                args = []  # Wrapper script handles the endpoint argument
-            else:
-                command_script = str(self.project_root / "server_manual.py")
-                args = []
-            
-            mcp_config["mcpServers"][server_name] = {
-                "command": str(self.project_root / "venv/bin/python"),
-                "args": [str(command_script)],
-                "env": {
-                    "AUTOCOST_PROVIDERS": ",".join(config["providers"]),
-                    "AUTOCOST_ENDPOINT": "manual",
-                    "AUTOCOST_ENABLE_CUSTOM_TOOLS": "true",
-                    "PYTHONPATH": str(self.project_root),
-                    "VIRTUAL_ENV": str(self.project_root / "venv")
-                },
-                "cwd": str(self.project_root)
-            }
+        # Get the Python executable path
+        python_path = self.get_python_executable()
+        server_script = str(self.project_root / "server_manual.py")
+        
+        # Add AWS server configuration
+        aws_config = {
+            "command": python_path,
+            "args": [server_script, "--config", "configs/aws.json"],
+            "env": {
+                "AUTOCOST_PROVIDERS": "aws",
+                "AUTOCOST_ENDPOINT": "aws",
+                "PYTHONPATH": str(self.project_root)
+            },
+            "cwd": str(self.project_root)
+        }
+        mcp_config["mcpServers"]["aws-cost-explorer"] = aws_config
+        
+        # Add GCP server configuration
+        gcp_config = {
+            "command": python_path,
+            "args": [server_script, "--config", "configs/gcp.json"],
+            "env": {
+                "AUTOCOST_PROVIDERS": "gcp",
+                "AUTOCOST_ENDPOINT": "gcp",
+                "PYTHONPATH": str(self.project_root)
+            },
+            "cwd": str(self.project_root)
+        }
+        
+        # Add GCP project ID if available in config
+        gcp_config_file = self.project_root / "configs" / "gcp.json"
+        if gcp_config_file.exists():
+            try:
+                with open(gcp_config_file, 'r') as f:
+                    gcp_config_data = json.load(f)
+                    if 'gcp' in gcp_config_data and 'project_id' in gcp_config_data['gcp']:
+                        gcp_config["env"]["GCP_PROJECT_ID"] = gcp_config_data['gcp']['project_id']
+            except Exception as e:
+                self.console.print(f"⚠️ Could not read GCP project ID from config: {e}", style="yellow")
+        mcp_config["mcpServers"]["gcp-cost-explorer"] = gcp_config
         
         # Save configuration
         try:
@@ -886,10 +999,8 @@ if __name__ == "__main__":
             
             # Show summary
             self.console.print("\n📋 **CURSOR MCP CONFIGURATIONS:**")
-            for endpoint_id, config in endpoints.items():
-                server_name = "aws-cost-explorer"  # Use consistent server name
-                providers = ", ".join(config["providers"])
-                self.console.print(f"• **{server_name}**: {providers}")
+            self.console.print("• **aws-cost-explorer**: AWS Cost Analysis Tools")
+            self.console.print("• **gcp-cost-explorer**: GCP Cost Analysis Tools")
             
             # Show restart instruction
             self.console.print(f"\n🔄 **RESTART CURSOR** to load new configurations")

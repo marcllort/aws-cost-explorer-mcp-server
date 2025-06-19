@@ -55,7 +55,15 @@ web = [
 gcp = [
     "google-cloud-billing>=1.12.0",
     "google-cloud-monitoring>=2.16.0",
+    "google-cloud-monitoring-dashboards>=2.13.0",
+    "google-cloud-monitoring-metrics-scopes>=1.5.0",
     "google-cloud-resource-manager>=1.10.4",
+    "google-cloud-container>=2.40.0",
+    "google-cloud-storage>=2.14.0",
+    "google-cloud-compute>=1.15.0",
+    "google-auth>=2.28.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-api-python-client>=2.120.0",
 ]
 
 azure = [

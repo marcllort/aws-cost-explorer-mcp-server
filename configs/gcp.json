@@ -1,0 +1,8 @@
+{
+  "endpoint_id": "gcp",
+  "providers": [
+    "gcp"
+  ],
+  "name": "autocost-gcp",
+  "pre_run_commands": []
+}

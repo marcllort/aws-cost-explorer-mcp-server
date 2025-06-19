@@ -7,6 +7,8 @@ Automatically loads saved credentials and configures providers based on environm
 import asyncio
 import sys
 import os
+import json
+import argparse
 from pathlib import Path
 
 # Add project root to path
@@ -19,7 +21,15 @@ from autocost_controller.core.logger import AutocostLogger
 from autocost_controller.core.provider_manager import ProviderManager
 from autocost_controller.tools import register_all_tools
 
-def capture_fresh_credentials():
+def capture_fresh_credentials(provider='aws'):
+    """Capture fresh credentials from current environment and save them."""
+    if provider == 'aws':
+        return capture_fresh_aws_credentials()
+    elif provider == 'gcp':
+        return capture_fresh_gcp_credentials()
+    return False
+
+def capture_fresh_aws_credentials():
     """Capture fresh AWS credentials from current environment and save them."""
     try:
         # Test if current environment has working AWS credentials
@@ -55,14 +65,49 @@ def capture_fresh_credentials():
             import json
             creds_file.write_text(json.dumps(creds_data, indent=2))
             
-            print(f"💾 Captured and saved fresh credentials to {creds_file}")
+            print(f"💾 Captured and saved fresh AWS credentials to {creds_file}")
             return True
             
     except Exception as e:
-        print(f"⚠️ Could not capture fresh credentials: {e}")
+        print(f"⚠️ Could not capture fresh AWS credentials: {e}")
         return False
 
-def load_saved_credentials():
+def capture_fresh_gcp_credentials():
+    """Capture fresh GCP credentials from current environment."""
+    try:
+        # Check for application default credentials
+        gcp_creds_path = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
+        if not os.path.exists(gcp_creds_path):
+            print("❌ No GCP application default credentials found")
+            return False
+            
+        # Verify GCP project ID is set
+        if 'GCP_PROJECT_ID' not in os.environ:
+            print("❌ GCP project ID not set. Please set GCP_PROJECT_ID in config or environment")
+            return False
+            
+        # Copy the credentials to our location
+        import shutil
+        target_creds = project_root / ".gcp_credentials.json"
+        shutil.copy2(gcp_creds_path, target_creds)
+        
+        print(f"💾 Captured and saved fresh GCP credentials to {target_creds}")
+        print(f"📝 Using GCP project: {os.environ.get('GCP_PROJECT_ID')}")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️ Could not capture fresh GCP credentials: {e}")
+        return False
+
+def load_saved_credentials(provider='aws'):
+    """Load saved credentials if available."""
+    if provider == 'aws':
+        return load_saved_aws_credentials()
+    elif provider == 'gcp':
+        return load_saved_gcp_credentials()
+    return False
+
+def load_saved_aws_credentials():
     """Load saved AWS credentials if available."""
     creds_file = project_root / ".aws_credentials.json"
     if creds_file.exists():
@@ -87,33 +132,52 @@ def load_saved_credentials():
                     
                 return True
             else:
-                print(f"⚠️ Saved credentials missing required keys")
+                print(f"⚠️ Saved AWS credentials missing required keys")
                 return False
                 
         except Exception as e:
-            print(f"⚠️ Could not load saved credentials: {e}")
+            print(f"⚠️ Could not load saved AWS credentials: {e}")
             return False
     return False
 
-def setup_aws_credentials():
-    """Setup AWS credentials with automatic detection and fallback."""
-    print("🔐 Setting up AWS credentials...")
+def load_saved_gcp_credentials():
+    """Load saved GCP credentials if available."""
+    creds_file = project_root / ".gcp_credentials.json"
+    if creds_file.exists():
+        try:
+            # Set the application credentials path
+            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(creds_file)
+            return True
+        except Exception as e:
+            print(f"⚠️ Could not load saved GCP credentials: {e}")
+            return False
+    return False
+
+def setup_credentials(provider='aws'):
+    """Setup credentials with automatic detection and fallback."""
+    print(f"🔐 Setting up {provider.upper()} credentials...")
     
     # First, try to capture fresh credentials from environment
-    if capture_fresh_credentials():
+    if capture_fresh_credentials(provider):
         return True
     
     # If that fails, try to load saved credentials
-    print("🔄 Trying saved credentials...")
-    if load_saved_credentials():
-        print("✅ Loaded saved credentials")
+    print(f"🔄 Trying saved {provider.upper()} credentials...")
+    if load_saved_credentials(provider):
+        print(f"✅ Loaded saved {provider.upper()} credentials")
         return True
     
-    print("⚠️ No working credentials found")
-    print("💡 To fix this:")
-    print("   1. In your terminal, assume your AWS role")
-    print("   2. Run: python save_current_session.py")
-    print("   3. Restart the MCP server")
+    print(f"⚠️ No working {provider.upper()} credentials found")
+    if provider == 'aws':
+        print("💡 To fix this:")
+        print("   1. In your terminal, assume your AWS role")
+        print("   2. Run: python save_credentials.py --provider aws")
+        print("   3. Restart the MCP server")
+    elif provider == 'gcp':
+        print("💡 To fix this:")
+        print("   1. Run: gcloud auth application-default login")
+        print("   2. Run: python save_credentials.py --provider gcp")
+        print("   3. Restart the MCP server")
     
     return False
 
@@ -122,33 +186,77 @@ def get_enabled_providers():
     providers_env = os.environ.get('AUTOCOST_PROVIDERS', 'aws')
     return [p.strip() for p in providers_env.split(',')]
 
+def load_config(config_path=None):
+    """Load configuration from file if provided."""
+    if not config_path:
+        return None
+        
+    try:
+        with open(config_path) as f:
+            config_data = json.load(f)
+            
+        # Set environment variables from config
+        if 'providers' in config_data:
+            os.environ['AUTOCOST_PROVIDERS'] = ','.join(config_data['providers'])
+        if 'endpoint' in config_data:
+            os.environ['AUTOCOST_ENDPOINT'] = config_data['endpoint']
+            
+        # Handle provider-specific configurations
+        if 'gcp' in config_data:
+            gcp_config = config_data['gcp']
+            if 'project_id' in gcp_config:
+                os.environ['GCP_PROJECT_ID'] = gcp_config['project_id']
+                print(f"📝 Set GCP project ID: {gcp_config['project_id']}")
+                
+        return config_data
+    except Exception as e:
+        print(f"⚠️ Error loading config from {config_path}: {e}")
+        return None
+
 def main():
     """Main server entry point with environment-based configuration."""
+    
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description="Autocost Controller MCP Server")
+    parser.add_argument("--test", action="store_true", help="Test setup and credentials")
+    parser.add_argument("--config", help="Path to configuration file")
+    args = parser.parse_args()
     
     # Enable custom tools by default if not explicitly set
     if 'AUTOCOST_ENABLE_CUSTOM_TOOLS' not in os.environ:
         os.environ['AUTOCOST_ENABLE_CUSTOM_TOOLS'] = 'true'
     
-    # Handle command line arguments
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--test":
-            # Test mode - check credentials and providers
-            print("🧪 Testing Autocost Controller setup...")
+    # Load configuration if provided
+    config_data = None
+    if args.config:
+        config_data = load_config(args.config)
+        if config_data:
+            print(f"📝 Loaded configuration from {args.config}")
             
-            # Load saved credentials
-            creds_loaded = load_saved_credentials()
+            # Set environment variables from config
+            if 'providers' in config_data:
+                os.environ['AUTOCOST_PROVIDERS'] = ','.join(config_data['providers'])
+            if 'endpoint' in config_data:
+                os.environ['AUTOCOST_ENDPOINT'] = config_data['endpoint']
+    
+    if args.test:
+        # Test mode - check credentials and providers
+        print("🧪 Testing Autocost Controller setup...")
+        
+        enabled_providers = get_enabled_providers()
+        print(f"🎯 Enabled providers: {', '.join(enabled_providers)}")
+        
+        # Test credentials for each provider
+        for provider in enabled_providers:
+            creds_loaded = load_saved_credentials(provider)
             if creds_loaded:
-                print("✅ Saved AWS credentials loaded")
+                print(f"✅ Saved {provider.upper()} credentials loaded")
             else:
-                print("⚠️ No saved credentials found, using environment")
+                print(f"⚠️ No saved {provider.upper()} credentials found, using environment")
             
             # Test providers
             config = Config()
             logger = AutocostLogger("autocost-test")
-            
-            enabled_providers = get_enabled_providers()
-            print(f"🎯 Enabled providers: {', '.join(enabled_providers)}")
-            
             provider_manager = ProviderManager(config, logger)
             
             # Give providers time to initialize
@@ -168,23 +276,15 @@ def main():
                         print(f"❌ {provider_name.upper()}: {status.status} - {error_msg}")
                 else:
                     print(f"❌ {provider_name.upper()}: not configured")
-            
-            return
-        elif sys.argv[1] == "--help":
-            print("Autocost Controller MCP Server")
-            print("Usage:")
-            print("  python server_manual.py          # Start MCP server")
-            print("  python server_manual.py --test   # Test setup and credentials")
-            print("\nEnvironment Variables:")
-            print("  AUTOCOST_PROVIDERS    # Comma-separated list of providers (default: aws)")
-            print("  AUTOCOST_ENDPOINT     # Endpoint identifier (optional)")
-            return
+        
+        return
     
-    # Setup AWS credentials with automatic detection
-    creds_ready = setup_aws_credentials()
-    
-    # Get enabled providers from environment
+    # Setup credentials for each enabled provider
     enabled_providers = get_enabled_providers()
+    creds_status = {}
+    for provider in enabled_providers:
+        creds_status[provider] = setup_credentials(provider)
+    
     endpoint_name = os.environ.get('AUTOCOST_ENDPOINT', 'manual')
     
     # Initialize components
@@ -194,7 +294,8 @@ def main():
     print(f"🚀 Starting Autocost Controller MCP Server")
     print(f"🎯 Endpoint: {endpoint_name}")
     print(f"🔧 Enabled providers: {', '.join(enabled_providers)}")
-    print(f"🔐 AWS credentials: {'✅ Ready' if creds_ready else '⚠️ Not ready'}")
+    for provider in enabled_providers:
+        print(f"🔐 {provider.upper()} credentials: {'✅ Ready' if creds_status[provider] else '⚠️ Not ready'}")
     
     # Create FastMCP instance
     mcp = FastMCP("Autocost Controller")
