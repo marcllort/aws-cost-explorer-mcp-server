@@ -519,6 +519,13 @@ source_profile = {source_profile}
         # Show required permissions
         if Confirm.ask("📋 Show required GCP IAM permissions?", default=False):
             self.show_gcp_iam_instructions()
+        
+        # Note about billing export setup
+        self.console.print("\n💡 **BigQuery Billing Export Setup**:", style="bold blue")
+        self.console.print("🎯 For comprehensive cost analysis, run: gcp_setup_billing_export")
+        self.console.print("📊 This interactive guide explains why you need billing export and walks you through setup")
+        self.console.print("🔧 Includes automated dataset creation and detailed console instructions")
+        self.console.print("💰 Enables advanced cost optimization and resource-level insights")
 
     def check_gcp_credentials(self) -> bool:
         """Check if GCP credentials are configured and valid (similar to AWS approach)."""

@@ -161,7 +161,7 @@ class GCPProvider(BaseProvider):
         }
         state_value = int(state) if hasattr(state, '__int__') else state
         return state_map.get(state_value, f'UNKNOWN_STATE_{state_value}')
-
+    
     def get_project_info(self, project_id: Optional[str] = None) -> Dict:
         """Get information about a specific project or current project."""
         try:
@@ -260,6 +260,9 @@ class GCPProvider(BaseProvider):
             # Log successful authentication
             self.logger.info(f"✅ GCP authentication successful - Access scope: {access_scope}", "gcp")
             
+            # Note: Billing export setup is now available via MCP tool
+            # Users can call gcp_setup_billing_export() when ready
+            
             capabilities = [
                 "cost_analysis",
                 "performance_metrics", 
@@ -336,22 +339,294 @@ class GCPProvider(BaseProvider):
     
     def get_client(self, service: str, project_id: Optional[str] = None) -> any:
         """Get a GCP client for the specified service."""
+        # Implementation would go here - this is a placeholder
+        # In a full implementation, this would return appropriate clients
+        # for different GCP services (compute, storage, monitoring, etc.)
+        
+        # For now, just return None to indicate the method exists
+        return None
+    
+    async def get_billing_account_info(self) -> Dict:
+        """Get billing account information for the current project."""
         try:
-            if service not in self._clients:
-                if service == 'billing':
-                    self._clients[service] = billing.CloudBillingClient()
-                elif service == 'monitoring':
-                    self._clients[service] = monitoring_v3.MetricServiceClient()
-                elif service == 'resource_manager':
-                    self._clients[service] = ProjectsClient()
+            from google.cloud import billing_v1
             
-            return self._clients[service]
+            client = billing_v1.CloudBillingClient()
+            
+            # Get billing accounts that the user has access to
+            billing_accounts = []
+            try:
+                for account in client.list_billing_accounts():
+                    billing_accounts.append({
+                        'name': account.name,
+                        'displayName': account.display_name,
+                        'open': account.open,
+                        'masterBillingAccount': account.master_billing_account
+                    })
+            except Exception as e:
+                self.logger.warning(f"Could not list billing accounts: {str(e)}", "gcp")
+            
+            return {
+                'billing_accounts': billing_accounts,
+                'current_project': self._current_project
+            }
+            
+        except ImportError:
+            self.logger.error("google-cloud-billing library not installed", "gcp")
+            return {'billing_accounts': [], 'error': 'Billing library not installed'}
+        except Exception as e:
+            self.logger.error(f"Error getting billing account info: {str(e)}", "gcp")
+            return {'billing_accounts': [], 'error': str(e)}
+    
+    def setup_billing_export_with_preferences(self, dataset_id: str = "billing_export", 
+                                             location: str = "US", 
+                                             table_prefix: str = "gcp_billing_export") -> tuple[bool, str]:
+        """
+        Set up BigQuery billing export with user-specified preferences.
+        
+        Args:
+            dataset_id: BigQuery dataset name for billing data
+            location: BigQuery dataset location (US, EU, etc.)
+            table_prefix: Prefix for billing export tables
+            
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        try:
+            from google.cloud import bigquery
+            from google.cloud import billing_v1
+            
+            self.logger.info("🔍 Checking BigQuery billing export setup...", "gcp")
+            
+            # Check if we have a current project
+            project_id = self._current_project
+            if not project_id:
+                return False, "❌ No current project set, cannot setup billing export"
+            
+            # Check if billing export already exists
+            if self._check_existing_billing_export(project_id, dataset_id):
+                return True, f"✅ BigQuery billing export already configured in dataset '{dataset_id}'"
+            
+            # Try to set up billing export
+            self.logger.info(f"🔧 Setting up BigQuery billing export in {location}...", "gcp")
+            
+            # Create BigQuery dataset if it doesn't exist
+            success, dataset_message = self._create_bigquery_dataset_if_needed(project_id, dataset_id, location)
+            
+            if success:
+                success_msg = f"""✅ **BigQuery Dataset Created Successfully**
+
+📊 **Configuration**:
+- Project: {project_id}
+- Dataset: {dataset_id}
+- Location: {location}
+- Table Prefix: {table_prefix}
+
+🔧 **Next Steps** (Complete in GCP Console):
+1. Go to Cloud Console → Billing → Billing Export
+2. Click "Create Export"
+3. Configure export:
+   • Project: {project_id}
+   • Dataset: {dataset_id}
+   • Table prefix: {table_prefix}
+   • Export type: Standard usage cost data
+4. Wait 24-48 hours for data to flow
+
+💡 **Alternative Setup** (gcloud CLI):
+```bash
+# Enable billing export API
+gcloud services enable bigquerydatatransfer.googleapis.com
+
+# Create billing export (requires billing admin role)
+gcloud beta billing export create \\
+  --billing-account=BILLING_ACCOUNT_ID \\
+  --dataset-id={dataset_id} \\
+  --project={project_id}
+```
+
+📋 **Required Permissions**:
+- BigQuery Data Editor (for dataset creation) ✅
+- Billing Account Administrator (for export creation)
+"""
+                return True, success_msg
+            else:
+                return False, dataset_message
+                
+        except ImportError:
+            return False, """❌ **BigQuery Library Missing**
+
+🔧 **Install Required Package**:
+```bash
+pip install google-cloud-bigquery
+```
+
+Or install with GCP dependencies:
+```bash
+pip install autocost-controller[gcp]
+```"""
+        except Exception as e:
+            error_msg = f"""❌ **Billing Export Setup Failed**
+
+**Error**: {str(e)}
+
+🔧 **Troubleshooting Steps**:
+
+1. **Check Permissions**:
+   - Ensure you have BigQuery Admin or Data Editor role
+   - Verify billing account access permissions
+
+2. **Manual Setup Alternative**:
+   - Go to Cloud Console → BigQuery
+   - Create dataset manually: {dataset_id}
+   - Set location: {location}
+   - Then set up billing export in console
+
+3. **Verify Prerequisites**:
+   - BigQuery API enabled: `gcloud services enable bigquery.googleapis.com`
+   - Billing account linked to project
+   - Sufficient quota in target location
+
+4. **Get Help**:
+   - Use gcp_billing_setup_and_cost_guide() for detailed instructions
+   - Check GCP Console → IAM for required permissions
+"""
+            return False, error_msg
+
+    def _check_existing_billing_export(self, project_id: str, dataset_id: str = "billing_export") -> bool:
+        """Check if billing export dataset and tables already exist."""
+        try:
+            from google.cloud import bigquery
+            
+            client = bigquery.Client(project=project_id)
+            dataset_ref = f"{project_id}.{dataset_id}"
+            
+            # Check if dataset exists
+            try:
+                dataset = client.get_dataset(dataset_ref)
+                
+                # Check if there are any billing export tables
+                tables = list(client.list_tables(dataset))
+                billing_tables = [t for t in tables if 'billing_export' in t.table_id or 'gcp_billing' in t.table_id]
+                
+                if billing_tables:
+                    self.logger.info(f"Found {len(billing_tables)} billing export tables in {dataset_id}", "gcp")
+                    return True
+                else:
+                    self.logger.info(f"Dataset '{dataset_id}' exists but no billing export tables found", "gcp")
+                    return False
+                    
+            except Exception:
+                # Dataset doesn't exist
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"Error checking existing billing export: {str(e)}", "gcp")
+            return False
+
+    def list_bigquery_datasets(self, project_id: Optional[str] = None) -> List[Dict]:
+        """List all BigQuery datasets in the project."""
+        try:
+            from google.cloud import bigquery
+            
+            target_project = project_id or self._current_project
+            if not target_project:
+                return []
+            
+            client = bigquery.Client(project=target_project)
+            datasets = []
+            
+            for dataset in client.list_datasets():
+                dataset_info = {
+                    'dataset_id': dataset.dataset_id,
+                    'full_dataset_id': f"{target_project}.{dataset.dataset_id}",
+                    'location': dataset.location if hasattr(dataset, 'location') else 'Unknown',
+                    'created': dataset.created.isoformat() if hasattr(dataset, 'created') and dataset.created else 'Unknown',
+                    'description': dataset.description if hasattr(dataset, 'description') else '',
+                    'labels': dict(dataset.labels) if hasattr(dataset, 'labels') and dataset.labels else {}
+                }
+                
+                # Get detailed dataset info
+                try:
+                    full_dataset = client.get_dataset(dataset.reference)
+                    dataset_info.update({
+                        'location': full_dataset.location,
+                        'created': full_dataset.created.isoformat() if full_dataset.created else 'Unknown',
+                        'description': full_dataset.description or '',
+                        'labels': dict(full_dataset.labels) if full_dataset.labels else {}
+                    })
+                    
+                    # Count tables in dataset
+                    tables = list(client.list_tables(full_dataset))
+                    dataset_info['table_count'] = len(tables)
+                    
+                    # Check for billing-related tables
+                    billing_tables = [t.table_id for t in tables if any(keyword in t.table_id.lower() 
+                                     for keyword in ['billing', 'cost', 'usage', 'gcp_billing_export'])]
+                    dataset_info['billing_tables'] = billing_tables
+                    dataset_info['has_billing_data'] = len(billing_tables) > 0
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error getting details for dataset {dataset.dataset_id}: {str(e)}", "gcp")
+                    dataset_info['table_count'] = 0
+                    dataset_info['billing_tables'] = []
+                    dataset_info['has_billing_data'] = False
+                
+                datasets.append(dataset_info)
+            
+            return datasets
+            
+        except ImportError:
+            self.logger.error("BigQuery library not available", "gcp")
+            return []
+        except Exception as e:
+            self.logger.error(f"Error listing BigQuery datasets: {str(e)}", "gcp")
+            return []
+
+    def _create_bigquery_dataset_if_needed(self, project_id: str, dataset_id: str, location: str = "US") -> tuple[bool, str]:
+        """Create BigQuery dataset for billing export if it doesn't exist."""
+        try:
+            from google.cloud import bigquery
+            
+            client = bigquery.Client(project=project_id)
+            dataset_ref = f"{project_id}.{dataset_id}"
+            
+            # Check if dataset already exists
+            try:
+                existing_dataset = client.get_dataset(dataset_ref)
+                return True, f"✅ Dataset '{dataset_id}' already exists in {existing_dataset.location}"
+            except Exception:
+                pass  # Dataset doesn't exist, create it
+            
+            # Validate location
+            valid_locations = ["US", "EU", "asia-east1", "asia-northeast1", "asia-southeast1", 
+                             "australia-southeast1", "europe-north1", "europe-west1", "europe-west2", 
+                             "europe-west3", "europe-west4", "europe-west6", "northamerica-northeast1",
+                             "southamerica-east1", "us-central1", "us-east1", "us-east4", "us-west1", 
+                             "us-west2", "us-west3", "us-west4"]
+            
+            if location not in valid_locations:
+                return False, f"❌ Invalid location '{location}'. Valid options: {', '.join(valid_locations[:10])}..."
+            
+            # Create the dataset
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = location
+            dataset.description = f"GCP billing export data for cost analysis (Created by Autocost Controller)"
+            
+            # Set dataset to auto-delete tables after 400 days (optional)
+            dataset.default_table_expiration_ms = 400 * 24 * 60 * 60 * 1000
+            
+            # Add labels for identification
+            dataset.labels = {
+                "created_by": "autocost_controller",
+                "purpose": "billing_export",
+                "auto_created": "true"
+            }
+            
+            created_dataset = client.create_dataset(dataset, timeout=30)
+            self.logger.info(f"✅ Created BigQuery dataset: {created_dataset.dataset_id} in {location}", "gcp")
+            return True, f"✅ Successfully created dataset '{dataset_id}' in {location}"
             
         except Exception as e:
-            self.logger.error(f"Failed to get GCP client for service '{service}': {str(e)}", "gcp")
-            return None
-    
-    # TODO: Implement GCP-specific methods
-    # def get_billing_client(self):
-    # def get_monitoring_client(self):
-    # def get_resource_manager_client(self): 
+            error_details = f"Failed to create BigQuery dataset '{dataset_id}' in {location}: {str(e)}"
+            self.logger.error(error_details, "gcp")
+            return False, f"❌ {error_details}"
