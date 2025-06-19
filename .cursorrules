@@ -1,24 +1,32 @@
 # Autocost Controller - Cursor Rules
 
 ## Project Overview
-This is a multi-cloud cost analysis and optimization platform with MCP (Model Context Protocol) integration. The project follows a modular, provider-based architecture that supports AWS, GCP, Azure, and other cloud providers.
+This is a **production-ready multi-cloud cost optimization platform** with **MCP (Model Context Protocol)** integration. The project follows a modular, provider-based architecture supporting **AWS, GCP, Azure, and DataDog** with a streamlined all-in-one setup experience.
 
 ## Core Architecture Principles
 
 ### 1. Provider-Based Architecture
 - Each cloud provider has its own module under `autocost_controller/providers/{provider_name}/`
 - Providers must inherit from `BaseProvider` in `autocost_controller/core/provider_manager.py`
-- All providers should implement the same interface for consistency
+- All providers implement the same interface: `validate_configuration()`, `test_connection()`, `get_capabilities()`
+- **DataDog provider** is fully implemented with authentication, client, models, and tools
 
-### 2. Environment-Based Configuration
-- Use environment variables for provider selection: `AUTOCOST_PROVIDERS=aws,gcp`
+### 2. Unified Entry Point
+- **`start.py`** is the single entry point for all operations
+- Supports multiple modes: default (quick setup), `--configure`, `--server`, `--verify`
+- Integrates credential capture, dependency management, and setup verification
+- **NO OTHER SCRIPTS** should be in the root directory
+
+### 3. Environment-Based Configuration
+- Use environment variables for provider selection: `AUTOCOST_PROVIDERS=aws,datadog`
 - Endpoint identification via `AUTOCOST_ENDPOINT=aws` or `unified`
-- No hardcoded credentials or provider-specific values in code
+- Additive `.env` file management - preserves existing settings
+- **Automatic credential capture** from current session/environment
 
-### 3. MCP Tool Organization
+### 4. MCP Tool Organization
 - Tools are organized by provider in `autocost_controller/tools/{provider}_tools.py`
 - Tool names follow the pattern: `{provider}_{category}_{action}`
-- Example: `aws_cost_explorer_analyze_costs`, `gcp_billing_get_usage`
+- Examples: `aws_cost_explorer_analyze_costs`, `datadog_logs_search`, `aws_profile_switch`
 
 ## Coding Standards
 
@@ -124,13 +132,15 @@ def register_{provider}_tools(mcp: FastMCP, provider_manager: ProviderManager,
 ### Tool Naming Convention
 - Format: `{provider}_{category}_{action}`
 - Provider: `aws`, `gcp`, `azure`, `datadog`
-- Category: `cost_explorer`, `performance`, `billing`, `usage`
-- Action: `analyze_costs`, `get_insights`, `list_services`
+- Category: `cost_explorer`, `performance`, `billing`, `usage`, `logs`, `metrics`, `profile`
+- Action: `analyze_costs`, `get_insights`, `list_services`, `search`, `query`, `switch`
 
 Examples:
-- ✅ `aws_cost_explorer_analyze_costs`
-- ✅ `gcp_billing_get_usage_report`
-- ✅ `azure_cost_management_optimize_resources`
+- ✅ `aws_cost_explorer_analyze_costs` - AWS cost analysis
+- ✅ `aws_profile_switch` - AWS profile management
+- ✅ `datadog_logs_search` - DataDog log search
+- ✅ `datadog_metrics_query` - DataDog metrics query
+- ✅ `datadog_usage_analysis` - DataDog usage analysis
 - ❌ `get_aws_costs` (wrong format)
 - ❌ `analyze_gcp_billing_data` (inconsistent)
 
@@ -138,9 +148,16 @@ Examples:
 
 ### Environment Variables
 - Use `AUTOCOST_` prefix for all project-specific variables
-- Provider lists: `AUTOCOST_PROVIDERS=aws,gcp,azure`
+- Provider lists: `AUTOCOST_PROVIDERS=aws,datadog`
 - Endpoint identification: `AUTOCOST_ENDPOINT=unified`
-- Feature flags: `AUTOCOST_FEATURE_CROSS_CLOUD=true`
+- DataDog: `DATADOG_API_KEY`, `DATADOG_APP_KEY`, `DATADOG_SITE`
+- AWS: Automatically captured from session/environment
+
+### Setup and Configuration
+- **Primary method**: Use `python start.py` for all setup operations
+- **Additive configuration**: Preserves existing `.env` settings
+- **Automatic dependency management**: Installs all required packages
+- **Credential capture**: Automatically detects and saves working credentials
 
 ### Config Class Usage
 ```python
@@ -207,9 +224,12 @@ def analyze_costs(
 ## Security Guidelines
 
 ### Credential Management
-- NEVER hardcode credentials in source code
-- Use environment variables or secure credential files
-- Implement credential rotation support
+- **NEVER hardcode credentials** in source code
+- **Automatic credential capture**: `start.py` captures working credentials from environment
+- **AWS session support**: Handles temporary credentials and assumed roles
+- **Environment variables**: Store DataDog API keys and other credentials
+- **Additive configuration**: Preserves existing settings when updating
+- **Connection testing**: Validates credentials before saving
 - Log authentication attempts (success/failure) without exposing secrets
 
 ### API Key Handling
@@ -252,7 +272,33 @@ async def get_cost_data(provider: str, date_range: str) -> Dict:
 - Respect provider rate limits
 - Use connection pooling where appropriate
 
+## Start.py Command Interface
+
+### Command-Line Modes
+```bash
+python start.py                    # Default: Quick setup (capture credentials + verify)
+python start.py --configure        # Full configuration wizard
+python start.py --server           # Start the MCP server
+python start.py --verify           # Verify current setup
+python start.py --help             # Show usage information
+```
+
+### Mode-Specific Behavior
+- **Default mode**: Automatic credential capture, dependency check, setup verification
+- **Configure mode**: Full interactive setup with provider configuration and IDE integration
+- **Server mode**: Pre-verification then server startup
+- **Verify mode**: Non-destructive setup validation with detailed reporting
+
 ## File Organization
+
+### Root Directory (Clean)
+```
+├── start.py                    # Single entry point for all operations  
+├── README.md                   # Comprehensive documentation
+├── PROVIDER_DEVELOPMENT.md     # Provider development guide
+├── pyproject.toml              # Dependencies and project metadata
+└── .env                        # Environment variables (auto-managed)
+```
 
 ### Module Structure
 ```
@@ -263,21 +309,25 @@ autocost_controller/
 │   ├── models.py           # Data models
 │   └── provider_manager.py # Provider lifecycle
 ├── providers/              # Provider implementations
-│   ├── aws/               # AWS provider
-│   ├── gcp/               # Google Cloud provider
-│   ├── azure/             # Azure provider
-│   └── datadog/           # DataDog provider
+│   ├── aws/               # AWS provider (complete)
+│   ├── gcp/               # Google Cloud provider (structure only)
+│   ├── azure/             # Azure provider (structure only)
+│   └── datadog/           # DataDog provider (complete)
+│       ├── auth.py        # Authentication handling
+│       ├── client.py      # API client wrapper
+│       ├── models.py      # Data models
+│       └── provider.py    # Provider implementation
 ├── tools/                  # MCP tool implementations
 │   ├── __init__.py        # Core tools registration
 │   ├── aws_tools.py       # AWS-specific tools
-│   └── gcp_tools.py       # GCP-specific tools
+│   └── datadog_tools.py   # DataDog-specific tools
 └── utils/                  # Shared utilities
 ```
 
 ### File Naming
 - Use snake_case for Python files: `aws_tools.py`, `provider_manager.py`
 - Use kebab-case for documentation: `setup-guide.md`, `provider-development.md`
-- Use UPPERCASE for constants files: `CONSTANTS.py`
+- **Root directory**: Only `start.py` and essential files (no utility scripts)
 
 ## Git Workflow
 
@@ -355,6 +405,32 @@ cost_tasks = [get_account_costs(account) for account in accounts]
 costs = await asyncio.gather(*cost_tasks)
 ```
 
+## Latest Developments (2024)
+
+### DataDog Provider Implementation
+- **Complete provider**: Authentication, client, models, tools
+- **API integration**: Logs, metrics, dashboards, usage analysis
+- **Connection testing**: Validates API/App keys before saving
+- **Tools**: `datadog_logs_search`, `datadog_metrics_query`, `datadog_usage_analysis`
+
+### Enhanced Setup Experience
+- **One-command setup**: `python start.py` handles everything
+- **Automatic dependency management**: Installs from pyproject.toml
+- **Credential capture**: Detects and saves working AWS credentials
+- **Multi-mode operation**: Setup, server, verification modes
+- **IDE integration**: Auto-configures Claude Desktop and Cursor
+
+### Credential Management Improvements
+- **Session token support**: Handles AWS assumed roles automatically
+- **Environment detection**: Finds working credentials from environment
+- **Additive configuration**: Updates .env without destroying existing settings
+- **Connection validation**: Tests AWS and DataDog connections before saving
+
+### Project Structure Cleanup
+- **Single entry point**: Only `start.py` in root directory
+- **Consolidated documentation**: Comprehensive README with all info
+- **Streamlined workflow**: Setup → Verify → Run server
+
 ## Review Checklist
 
 Before submitting code:
@@ -368,6 +444,8 @@ Before submitting code:
 - [ ] Environment variables are documented
 - [ ] Async/await used for I/O operations
 - [ ] Logging follows the project standards
+- [ ] **New**: Only essential files in root directory (no utility scripts)
+- [ ] **New**: Use start.py for all setup and operational tasks
 
 ## Getting Help
 
@@ -375,4 +453,4 @@ Before submitting code:
 - Refer to the BaseProvider interface for required methods
 - Use the AutocostLogger for consistent logging
 - Follow the tool registration patterns in existing files
-- Test with `python server_manual.py --test` before submitting 
+- Test with `python start.py --test` before submitting 

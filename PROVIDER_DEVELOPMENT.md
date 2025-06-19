@@ -583,7 +583,7 @@ def register_core_tools(mcp: FastMCP, provider_manager: ProviderManager, config:
 ### Update Server Registration
 
 ```python
-# server_manual.py
+# start.py --server
 # Add to the main() function:
 
 if "gcp" in enabled_providers:
@@ -770,7 +770,7 @@ async def gcp_optimization_recommendations(
 
 - Study the AWS provider implementation for patterns
 - Check the `.cursorrules` file for coding standards
-- Test with `python server_manual.py --test`
+- Test with `python start.py --test`
 - Use the AutocostLogger for consistent error reporting
 - Follow the provider interface exactly as defined in `BaseProvider`
 

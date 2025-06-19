@@ -13,6 +13,10 @@ from rich.table import Table
 
 def is_mcp_mode() -> bool:
     """Detect if we're running in MCP mode where stdout is used for JSON communication."""
+    # Explicit MCP mode flag
+    if os.environ.get("AUTOCOST_MCP_MODE") == "true":
+        return True
+    
     # Check if we're running with stdio transport (default for MCP)
     transport = os.environ.get("MCP_TRANSPORT", "stdio")
     

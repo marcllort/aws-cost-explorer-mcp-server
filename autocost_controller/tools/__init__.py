@@ -203,5 +203,6 @@ def register_azure_tools(mcp: FastMCP, provider_manager: ProviderManager, config
 
 
 def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, config: Config, logger: AutocostLogger) -> None:
-    """Register DataDog-specific tools (placeholder)."""
-    logger.info("🔧 DataDog tools registration - coming soon...") 
+    """Register DataDog-specific tools."""
+    from .datadog_tools import register_datadog_tools as register_dd_tools
+    register_dd_tools(mcp, provider_manager, config, logger) 

@@ -1,0 +1,13 @@
+{
+  "endpoint_id": "datadog_config",
+  "providers": [
+    "datadog_config"
+  ],
+  "name": "autocost-datadog_config",
+  "description": "DATADOG_CONFIG cost analysis endpoint",
+  "environment": {
+    "AUTOCOST_ENDPOINT": "datadog_config",
+    "AUTOCOST_PROVIDERS": "datadog_config"
+  },
+  "pre_run_commands": []
+}
