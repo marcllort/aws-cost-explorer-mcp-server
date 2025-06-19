@@ -5,6 +5,8 @@ from google.cloud import billing
 from google.cloud import monitoring_v3
 from google.oauth2 import service_account
 import os
+import json
+from pathlib import Path
 from typing import List, Optional, Dict
 from datetime import datetime
 
@@ -21,11 +23,56 @@ class GCPProvider(BaseProvider):
         super().__init__(config, logger)
         self._clients = {}
         self._current_project = None
+        self._organization_id = None
         self._credentials = None
+        
+        # Load saved credentials if available (similar to AWS approach)
+        self._load_saved_credentials()
         
         # Set initial project from config
         if config.gcp_project_id:
             self.set_project(config.gcp_project_id)
+        
+        # Set organization ID from config
+        if config.gcp_organization_id:
+            self._organization_id = config.gcp_organization_id
+            self.logger.info(f"🏢 Organization ID configured: {self._organization_id}", "gcp")
+    
+    def _load_saved_credentials(self) -> bool:
+        """Load saved GCP credentials from .gcp_credentials.json file (similar to AWS approach)."""
+        try:
+            # Look for saved credentials file
+            project_root = Path(__file__).parent.parent.parent.parent
+            creds_file = project_root / ".gcp_credentials.json"
+            
+            if not creds_file.exists():
+                self.logger.debug("No saved GCP credentials file found", "gcp")
+                return False
+            
+            with open(creds_file, 'r') as f:
+                creds_data = json.load(f)
+            
+            # Set up environment for GCP credentials
+            if creds_data.get("type") == "service_account" and creds_data.get("credentials_file"):
+                # Service account credentials
+                if os.path.exists(creds_data["credentials_file"]):
+                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_data["credentials_file"]
+                    self.logger.info("✅ Loaded GCP service account credentials from saved file", "gcp")
+                else:
+                    self.logger.warning(f"Service account file not found: {creds_data['credentials_file']}", "gcp")
+                    return False
+            
+            # Set project and organization from saved credentials
+            if creds_data.get("project_id"):
+                self._current_project = creds_data["project_id"]
+                self.logger.info(f"📝 Using saved project: {self._current_project}", "gcp")
+            
+            self.logger.info(f"✅ Loaded GCP credentials - Source: {creds_data.get('source', 'unknown')}", "gcp")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error loading saved GCP credentials: {str(e)}", "gcp")
+            return False
     
     def get_provider_name(self) -> ProviderType:
         """Return the provider name."""
@@ -68,6 +115,31 @@ class GCPProvider(BaseProvider):
         """Get the currently active GCP project."""
         return self._current_project
     
+    def get_organization_id(self) -> Optional[str]:
+        """Get the configured GCP organization ID."""
+        return self._organization_id
+    
+    def get_access_scope(self) -> str:
+        """Get the current access scope (project or organization)."""
+        return "organization" if self._organization_id else "project"
+    
+    def test_organization_access(self) -> bool:
+        """Test organization access when needed (lazy loading)."""
+        if not self._organization_id:
+            return False
+            
+        try:
+            self.logger.info(f"🔍 Verifying organization access to {self._organization_id}...", "gcp")
+            client = ProjectsClient()
+            # Test organization access by listing a few projects
+            request = {"page_size": 5, "query": f"parent.id:{self._organization_id}"}
+            projects = list(client.search_projects(request=request))
+            self.logger.info(f"✅ Organization access verified - Found {len(projects)} project(s)", "gcp")
+            return True
+        except Exception as e:
+            self.logger.warning(f"⚠️ Organization access test failed: {e}", "gcp")
+            return False
+    
     def list_available_projects(self) -> List[str]:
         """List all available GCP projects."""
         try:
@@ -79,6 +151,17 @@ class GCPProvider(BaseProvider):
             self.logger.error(f"Error listing GCP projects: {str(e)}", "gcp")
             return []
     
+    def _get_project_state_name(self, state) -> str:
+        """Convert project state enum to readable name."""
+        state_map = {
+            0: 'LIFECYCLE_STATE_UNSPECIFIED',
+            1: 'ACTIVE', 
+            2: 'DELETE_REQUESTED',
+            3: 'DELETE_IN_PROGRESS'
+        }
+        state_value = int(state) if hasattr(state, '__int__') else state
+        return state_map.get(state_value, f'UNKNOWN_STATE_{state_value}')
+
     def get_project_info(self, project_id: Optional[str] = None) -> Dict:
         """Get information about a specific project or current project."""
         try:
@@ -86,14 +169,20 @@ class GCPProvider(BaseProvider):
             request = {"name": f"projects/{project_id or self._current_project}"}
             project = client.get_project(request=request)
             
-            return {
+            # Build project info dict with safe attribute access
+            project_info = {
                 'project_id': project.project_id,
-                'name': project.display_name,
-                'number': project.project_number,
-                'state': project.state,
-                'create_time': project.create_time,
-                'labels': dict(project.labels)
+                'name': getattr(project, 'display_name', project.project_id),
+                'state': self._get_project_state_name(project.state) if hasattr(project, 'state') else 'UNKNOWN',
+                'labels': dict(getattr(project, 'labels', {}))
             }
+            
+            # Add optional fields if they exist
+            if hasattr(project, 'create_time') and project.create_time:
+                project_info['create_time'] = project.create_time
+            
+            return project_info
+            
         except Exception as e:
             self.logger.error(f"Error getting project info: {str(e)}", "gcp")
             return {}
@@ -124,31 +213,52 @@ class GCPProvider(BaseProvider):
             # Clear any cached clients to ensure fresh authentication
             self._clients.clear()
             
-            # Check if project is set
+            # Check for organization ID first
+            if not self._organization_id:
+                org_id = os.environ.get("GCP_ORGANIZATION_ID")
+                if org_id:
+                    self._organization_id = org_id
+                    self.logger.info(f"🏢 Organization ID configured: {org_id}", "gcp")
+            
+            # Check if project is set (required for some operations, but not all)
             if not self._current_project:
-                self.logger.info("🔍 Checking environment for GCP project ID...", "gcp")
                 project_id = os.environ.get("GCP_PROJECT_ID")
                 if project_id:
-                    self.logger.info(f"✅ Found GCP project ID in environment: {project_id}", "gcp")
                     self._current_project = project_id
-                else:
-                    self.logger.error("❌ No GCP project ID found in environment or config", "gcp")
-                    raise ValueError("GCP project not configured - set GCP_PROJECT_ID environment variable or configure in config file")
+                elif not self._organization_id:
+                    # Only require project ID if no organization ID is set
+                    self.logger.error("❌ No GCP project ID or organization ID found", "gcp")
+                    raise ValueError("GCP project or organization not configured - set GCP_PROJECT_ID or GCP_ORGANIZATION_ID environment variable")
             
-            # Log the project we're trying to use
-            self.logger.info(f"🔍 Validating GCP project: {self._current_project}", "gcp")
+            # Determine access scope
+            if self._organization_id:
+                self.logger.info(f"🏢 Using organization-level access: {self._organization_id}", "gcp")
+                access_scope = "organization"
+            else:
+                self.logger.info(f"📝 Using project-level access: {self._current_project}", "gcp")
+                access_scope = "project"
             
-            # Check GCP credentials
+            # Quick credential test - just create client without making API calls
             self.logger.info("🔍 Checking GCP credentials...", "gcp")
-            client = ProjectsClient()
-            
-            # Verify access by getting the specific project
-            self.logger.info(f"🔍 Verifying access to project {self._current_project}...", "gcp")
-            request = {"name": f"projects/{self._current_project}"}
-            project = client.get_project(request=request)
+            try:
+                client = ProjectsClient()
+                # Only test actual API access if explicitly needed
+                if access_scope == "project" and self._current_project:
+                    # Quick project validation
+                    request = {"name": f"projects/{self._current_project}"}
+                    project = client.get_project(request=request)
+                    self.logger.info(f"✅ Project access verified - Project: {project.project_id}", "gcp")
+                else:
+                    # For organization access, just verify we can create the client
+                    # Actual organization access will be tested when needed
+                    self.logger.info("✅ GCP credentials loaded successfully", "gcp")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ GCP credential validation failed: {str(e)}", "gcp")
+                raise e
             
             # Log successful authentication
-            self.logger.info(f"✅ GCP authentication successful - Project: {project.project_id}", "gcp")
+            self.logger.info(f"✅ GCP authentication successful - Access scope: {access_scope}", "gcp")
             
             capabilities = [
                 "cost_analysis",
@@ -156,9 +266,14 @@ class GCPProvider(BaseProvider):
                 "optimization_recommendations",
                 "dimension_discovery",
                 "tag_analysis",
-                "billing_account_access",
-                "project_switching"
+                "billing_account_access"
             ]
+            
+            # Add scope-specific capabilities
+            if access_scope == "organization":
+                capabilities.extend(["organization_access", "cross_project_analysis"])
+            else:
+                capabilities.append("project_switching")
             
             return ProviderStatus(
                 provider="gcp",
@@ -179,9 +294,9 @@ class GCPProvider(BaseProvider):
             elif "permission denied" in error_msg.lower():
                 missing_config.append("insufficient_permissions")
                 self.logger.error(f"❌ GCP credentials have insufficient permissions: {error_msg}", "gcp")
-            elif "project" in error_msg.lower():
-                missing_config.append("gcp_project")
-                self.logger.error(f"❌ GCP project not configured or invalid: {error_msg}", "gcp")
+            elif "project" in error_msg.lower() or "organization" in error_msg.lower():
+                missing_config.append("gcp_project_or_organization")
+                self.logger.error(f"❌ GCP project or organization not configured: {error_msg}", "gcp")
             else:
                 self.logger.error(f"❌ GCP validation failed: {error_msg}", "gcp")
             

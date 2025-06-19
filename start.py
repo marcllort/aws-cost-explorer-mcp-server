@@ -66,6 +66,32 @@ class AutocostSetup:
     def get_python_executable(self) -> str:
         """Get the path to the current Python executable."""
         return sys.executable
+    
+    def _get_gcp_env_vars(self) -> Dict[str, str]:
+        """Get GCP environment variables from saved credentials file."""
+        env_vars = {}
+        
+        try:
+            creds_file = Path(".gcp_credentials.json")
+            if creds_file.exists():
+                with open(creds_file, 'r') as f:
+                    creds_data = json.load(f)
+                
+                # Add project ID if available - check multiple possible field names
+                project_id = (creds_data.get("project_id") or 
+                             creds_data.get("quota_project_id") or 
+                             creds_data.get("default_project_id"))
+                if project_id:
+                    env_vars["GCP_PROJECT_ID"] = project_id
+                
+                # Add organization ID if available
+                if creds_data.get("organization_id"):
+                    env_vars["GCP_ORGANIZATION_ID"] = creds_data["organization_id"]
+                    
+        except Exception as e:
+            self.console.print(f"⚠️ Could not read GCP credentials for environment variables: {e}", style="yellow")
+        
+        return env_vars
 
     def show_banner(self):
         """Display the enhanced startup banner."""
@@ -441,56 +467,78 @@ source_profile = {source_profile}
         self.console.print("• For cross-account access, ensure the role trusts your account")
 
     def configure_gcp(self):
-        """Configure GCP with enhanced credential checking."""
+        """Configure GCP by reading saved credentials (consistent with AWS approach)."""
         self.console.print("\n🔵 GCP CONFIGURATION", style="bold blue")
         
         # Check for existing credentials
         gcp_configured = self.check_gcp_credentials()
         
         if not gcp_configured:
-            self.console.print("❌ GCP credentials not found or invalid", style="red")
+            self.console.print("❌ GCP credentials not found", style="red")
+            self.console.print("\n💡 **Setup Instructions:**", style="bold blue")
+            self.console.print("1. Run: python save_credentials_gcp.py [project_id] [--org-id ORGANIZATION_ID]")
+            self.console.print("2. This will save your GCP credentials for the server to use")
+            self.console.print("3. Come back and run this setup again")
             
-            setup_method = Prompt.ask(
-                "Choose GCP setup method",
-                choices=["application-default", "service-account", "skip"],
-                default="application-default"
-            )
-            
-            if setup_method == "application-default":
-                self.setup_gcp_application_default()
-            elif setup_method == "service-account":
-                self.setup_gcp_service_account()
-            elif setup_method == "skip":
-                self.console.print("⚠️ Skipping GCP setup. Configure manually later.", style="yellow")
+            skip_gcp = Confirm.ask("Skip GCP setup for now?", default=True)
+            if skip_gcp:
+                self.console.print("⚠️ Skipping GCP setup. Run save_credentials_gcp.py first.", style="yellow")
                 return
+        
+        # Read project ID and organization ID from saved credentials
+        try:
+            creds_file = Path(".gcp_credentials.json")
+            if creds_file.exists():
+                with open(creds_file, 'r') as f:
+                    creds_data = json.load(f)
+                
+                # Display project information - check multiple possible field names
+                project_id = (creds_data.get("project_id") or 
+                             creds_data.get("quota_project_id") or 
+                             creds_data.get("default_project_id"))
+                if project_id:
+                    project_name = creds_data.get("project_name", "Unknown")
+                    self.console.print(f"✅ Project: {project_id} ({project_name})", style="green")
+                    
+                # Display organization information if available
+                if creds_data.get("organization_id"):
+                    org_id = creds_data["organization_id"]
+                    org_source = creds_data.get("organization_source", "saved credentials")
+                    self.config_data['gcp_organization_id'] = org_id
+                    self.console.print(f"✅ Organization: {org_id} (from {org_source})", style="green")
+                else:
+                    self.console.print("ℹ️ No organization ID found - using project-level access", style="blue")
+                
+                # Display credential source
+                cred_source = creds_data.get("source", "unknown")
+                self.console.print(f"📊 Credential source: {cred_source}", style="cyan")
+                    
+        except Exception as e:
+            self.console.print(f"⚠️ Could not read GCP credentials: {e}", style="yellow")
         
         # Show required permissions
         if Confirm.ask("📋 Show required GCP IAM permissions?", default=False):
             self.show_gcp_iam_instructions()
-        
-        # Test credentials again
-        final_check = self.check_gcp_credentials()
 
     def check_gcp_credentials(self) -> bool:
-        """Check if GCP credentials are configured and valid."""
+        """Check if GCP credentials are configured and valid (similar to AWS approach)."""
         try:
-            # Run the credential saving script
-            script_path = Path("save_credentials_gcp.py")
-            if not script_path.exists():
-                self.console.print("❌ GCP credential saving script not found", style="red")
-                return False
-            
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode == 0:
-                self.console.print("✅ GCP credentials are valid", style="green")
-                return True
+            # Check for saved credentials file (similar to AWS approach)
+            creds_file = Path(".gcp_credentials.json")
+            if creds_file.exists():
+                with open(creds_file, 'r') as f:
+                    creds_data = json.load(f)
+                    
+                # Verify the credentials data looks valid
+                if creds_data.get("project_id") and creds_data.get("source"):
+                    self.console.print("✅ GCP credentials file found and appears valid", style="green")
+                    return True
+                else:
+                    self.console.print("⚠️ GCP credentials file exists but appears incomplete", style="yellow")
+                    return False
             else:
-                self.console.print(f"❌ GCP credential check failed: {result.stderr}", style="red")
+                self.console.print("❌ No saved GCP credentials found", style="red")
+                self.console.print("💡 Run: python save_credentials_gcp.py [project_id]", style="blue")
                 return False
                 
         except Exception as e:
@@ -498,43 +546,60 @@ source_profile = {source_profile}
             return False
 
     def setup_gcp_application_default(self):
-        """Set up GCP using application default credentials."""
-        self.console.print("\n📝 Setting up GCP Application Default Credentials")
-        self.console.print("1. Install Google Cloud SDK if not already installed")
-        self.console.print("2. Run: gcloud auth application-default login")
-        self.console.print("3. Follow the browser authentication flow")
-        
-        if Confirm.ask("Have you completed these steps?"):
-            if self.check_gcp_credentials():
-                self.console.print("✅ GCP credentials configured successfully!", style="green")
-            else:
-                self.console.print("❌ GCP credential setup failed", style="red")
+        """Set up GCP using application default credentials (deprecated - use save_credentials_gcp.py)."""
+        self.console.print("\n📝 **DEPRECATED SETUP METHOD**", style="yellow")
+        self.console.print("Please use the new simplified approach:")
+        self.console.print("1. Run: python save_credentials_gcp.py [project_id]")
+        self.console.print("2. This will handle all credential setup automatically")
 
     def setup_gcp_service_account(self):
-        """Set up GCP using a service account key file."""
-        self.console.print("\n📝 Setting up GCP Service Account")
-        self.console.print("1. Create a service account in GCP Console")
-        self.console.print("2. Grant required permissions")
-        self.console.print("3. Download the JSON key file")
-        
-        key_file = Prompt.ask("Enter path to service account key file")
-        if os.path.exists(key_file):
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = key_file
-            if self.check_gcp_credentials():
-                self.console.print("✅ GCP credentials configured successfully!", style="green")
-            else:
-                self.console.print("❌ GCP credential setup failed", style="red")
-        else:
-            self.console.print("❌ Key file not found", style="red")
+        """Set up GCP using a service account key file (deprecated - use save_credentials_gcp.py)."""
+        self.console.print("\n📝 **DEPRECATED SETUP METHOD**", style="yellow")
+        self.console.print("Please use the new simplified approach:")
+        self.console.print("1. Set GOOGLE_APPLICATION_CREDENTIALS to your service account key file")
+        self.console.print("2. Run: python save_credentials_gcp.py [project_id]")
+        self.console.print("3. This will handle all credential setup automatically")
 
     def show_gcp_iam_instructions(self):
-        """Show required GCP IAM permissions."""
+        """Show required GCP IAM permissions based on saved credentials."""
         self.console.print("\n📋 Required GCP IAM Permissions:")
-        self.console.print("Your service account needs these roles:")
-        self.console.print("• roles/billing.viewer")
-        self.console.print("• roles/monitoring.viewer")
-        self.console.print("• roles/bigquery.user")
-        self.console.print("• roles/resourcemanager.projectViewer")
+        
+        # Check if organization access is configured from saved credentials
+        has_org_id = False
+        org_id = None
+        
+        try:
+            creds_file = Path(".gcp_credentials.json")
+            if creds_file.exists():
+                with open(creds_file, 'r') as f:
+                    creds_data = json.load(f)
+                    if creds_data.get("organization_id"):
+                        has_org_id = True
+                        org_id = creds_data["organization_id"]
+        except:
+            # Fallback to config_data if file read fails
+            has_org_id = 'gcp_organization_id' in self.config_data
+            org_id = self.config_data.get('gcp_organization_id')
+        
+        if has_org_id and org_id:
+            self.console.print("For ORGANIZATION-LEVEL access, your service account needs these roles:")
+            self.console.print("• roles/billing.viewer (at organization level)")
+            self.console.print("• roles/resourcemanager.organizationViewer")
+            self.console.print("• roles/monitoring.viewer (at organization level)")
+            self.console.print("• roles/bigquery.user (for billing export access)")
+            self.console.print("• roles/resourcemanager.projectViewer (for project enumeration)")
+            
+            self.console.print(f"\n🏢 Organization ID: {org_id}")
+            self.console.print("\n💡 To grant organization-level permissions:")
+            self.console.print("1. Go to GCP Console → IAM & Admin → IAM")
+            self.console.print("2. Select your organization at the top")
+            self.console.print("3. Add your service account with the roles above")
+        else:
+            self.console.print("For PROJECT-LEVEL access, your service account needs these roles:")
+            self.console.print("• roles/billing.viewer")
+            self.console.print("• roles/monitoring.viewer")
+            self.console.print("• roles/bigquery.user")
+            self.console.print("• roles/resourcemanager.projectViewer")
 
     def configure_endpoints(self, providers_config: Dict[str, bool]) -> Dict[str, Dict]:
         """Configure provider-specific endpoints with environment variables."""
@@ -557,6 +622,11 @@ source_profile = {source_profile}
                     "AUTOCOST_PROVIDERS": ",".join(enabled_providers)
                 }
             }
+            
+            # Add GCP environment variables to unified endpoint if configured
+            if "gcp" in enabled_providers:
+                gcp_env_vars = self._get_gcp_env_vars()
+                endpoints["unified"]["environment"].update(gcp_env_vars)
         
         # Create individual provider endpoints
         for provider_name in enabled_providers:
@@ -580,6 +650,10 @@ source_profile = {source_profile}
                     endpoints[provider_name]["environment"]["AWS_PROFILE"] = self.config_data['aws_profile']
                 if 'aws_auth_command' in self.config_data:
                     endpoints[provider_name]["auth_command"] = self.config_data['aws_auth_command']
+            elif provider_name == "gcp":
+                # Add GCP-specific configuration from saved credentials
+                gcp_env_vars = self._get_gcp_env_vars()
+                endpoints[provider_name]["environment"].update(gcp_env_vars)
         
         # Show configuration summary
         table = Table(title="Configured Endpoints")
@@ -980,16 +1054,10 @@ if __name__ == "__main__":
             "cwd": str(self.project_root)
         }
         
-        # Add GCP project ID if available in config
-        gcp_config_file = self.project_root / "configs" / "gcp.json"
-        if gcp_config_file.exists():
-            try:
-                with open(gcp_config_file, 'r') as f:
-                    gcp_config_data = json.load(f)
-                    if 'gcp' in gcp_config_data and 'project_id' in gcp_config_data['gcp']:
-                        gcp_config["env"]["GCP_PROJECT_ID"] = gcp_config_data['gcp']['project_id']
-            except Exception as e:
-                self.console.print(f"⚠️ Could not read GCP project ID from config: {e}", style="yellow")
+        # Add GCP environment variables from saved credentials
+        gcp_env_vars = self._get_gcp_env_vars()
+        gcp_config["env"].update(gcp_env_vars)
+        
         mcp_config["mcpServers"]["gcp-cost-explorer"] = gcp_config
         
         # Save configuration
@@ -1041,7 +1109,18 @@ if __name__ == "__main__":
                 "# AWS Configuration"
             ])
             for key, value in self.config_data.items():
-                env_content.append(f"{key}={value}")
+                if key.startswith('aws_'):
+                    env_content.append(f"{key}={value}")
+            
+            # Add GCP configuration if provided
+            if any(key.startswith('gcp_') for key in self.config_data.keys()):
+                env_content.extend([
+                    "",
+                    "# GCP Configuration"
+                ])
+                for key, value in self.config_data.items():
+                    if key.startswith('gcp_'):
+                        env_content.append(f"{key}={value}")
         
         # Add endpoint configuration
         env_content.extend([
@@ -1067,6 +1146,14 @@ if __name__ == "__main__":
                 "name": config["name"],
                 "pre_run_commands": config.get("pre_run_commands", [])
             }
+            
+            # Add provider-specific configuration
+            if "gcp" in config["providers"]:
+                gcp_config = {}
+                if 'gcp_organization_id' in self.config_data:
+                    gcp_config["organization_id"] = self.config_data['gcp_organization_id']
+                if gcp_config:
+                    endpoint_config["gcp"] = gcp_config
             
             config_file = config_dir / f"{endpoint_id}.json"
             with open(config_file, 'w') as f:

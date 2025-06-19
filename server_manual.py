@@ -207,6 +207,9 @@ def load_config(config_path=None):
             if 'project_id' in gcp_config:
                 os.environ['GCP_PROJECT_ID'] = gcp_config['project_id']
                 print(f"📝 Set GCP project ID: {gcp_config['project_id']}")
+            if 'organization_id' in gcp_config:
+                os.environ['GCP_ORGANIZATION_ID'] = gcp_config['organization_id']
+                print(f"🏢 Set GCP organization ID: {gcp_config['organization_id']}")
                 
         return config_data
     except Exception as e:
@@ -238,6 +241,19 @@ def main():
                 os.environ['AUTOCOST_PROVIDERS'] = ','.join(config_data['providers'])
             if 'endpoint' in config_data:
                 os.environ['AUTOCOST_ENDPOINT'] = config_data['endpoint']
+            
+            # Handle GCP organization ID from config
+            if 'gcp' in config_data and 'organization_id' in config_data['gcp']:
+                os.environ['GCP_ORGANIZATION_ID'] = config_data['gcp']['organization_id']
+                print(f"🏢 Set GCP organization ID: {config_data['gcp']['organization_id']}")
+    
+    # Also check for GCP organization ID in environment variables
+    if 'GCP_ORGANIZATION_ID' in os.environ:
+        print(f"🏢 Using GCP organization ID: {os.environ['GCP_ORGANIZATION_ID']}")
+    elif 'GCP_PROJECT_ID' in os.environ:
+        print(f"📝 Using GCP project ID: {os.environ['GCP_PROJECT_ID']}")
+    elif 'gcp' in get_enabled_providers():
+        print("⚠️ No GCP project or organization ID configured")
     
     if args.test:
         # Test mode - check credentials and providers

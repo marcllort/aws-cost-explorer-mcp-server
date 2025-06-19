@@ -40,6 +40,7 @@ venv.bak/
 
 # Credentials and sensitive files
 .aws_credentials.json
+.gcp_credentials.json
 *.pem
 *.key
 .env.local

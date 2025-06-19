@@ -427,8 +427,8 @@ This analysis requires:
                         output.append(f"   {date}: ${cost:.2f}")
                     
                     return "\n".join(output)
-            
-        except Exception as e:
+                
+                except Exception as e:
                     return f"""📊 **GCP ROLLING COST ANALYSIS**
 ⚠️ **Monitoring data not available**: {str(e)}
 
@@ -1037,7 +1037,7 @@ This analysis requires:
                         if family_cud >= 1:
                             family_savings = family_cud * 0.37 * 24 * 365
                             output.append(f"     • {family.upper()}: {family_cud} vCPUs (${family_savings:.0f}/year)")
-            else:
+                else:
                     output.append(f"   📊 **Current usage too low**: {total_vcpus} vCPUs")
                     output.append(f"   💡 **Recommendation**: Wait until consistent 10+ vCPU usage")
                 

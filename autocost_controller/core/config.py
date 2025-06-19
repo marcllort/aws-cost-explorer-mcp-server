@@ -29,6 +29,7 @@ class Config:
         
         # GCP Configuration
         self.gcp_project_id = os.environ.get('GCP_PROJECT_ID')
+        self.gcp_organization_id = os.environ.get('GCP_ORGANIZATION_ID')
         self.gcp_credentials_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
         self.gcp_billing_account = os.environ.get('GCP_BILLING_ACCOUNT_ID')
         
@@ -87,7 +88,7 @@ class Config:
             validation['aws_credentials'] = self._check_aws_credentials()
             
         elif provider == 'gcp':
-            validation['gcp_project_id'] = bool(self.gcp_project_id)
+            validation['gcp_project_or_org'] = bool(self.gcp_project_id or self.gcp_organization_id)
             validation['gcp_credentials'] = bool(self.gcp_credentials_path) or self._check_gcp_default_credentials()
             
         elif provider == 'azure':
@@ -150,6 +151,7 @@ class Config:
             'log_level': self.log_level,
             'aws_region': self.aws_region,
             'gcp_project_id': self.gcp_project_id,
+            'gcp_organization_id': self.gcp_organization_id,
             'azure_subscription_id': self.azure_subscription_id,
             'performance_settings': {
                 'max_instances_per_analysis': self.max_instances_per_analysis,
