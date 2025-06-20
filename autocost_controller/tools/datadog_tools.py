@@ -2605,11 +2605,20 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
                                     f"avg:{service_name}.runtime{{*}} by {{{breakdown_by}}}",
                                     f"sum:{service_name}.hours{{*}} by {{{breakdown_by}}}"
                                 ])
-                            elif "duration" in title_lower:
+                            elif "duration" in title_lower or "average" in title_lower:
                                 metric_patterns.extend([
                                     f"avg:{service_name}.duration{{*}} by {{{breakdown_by}}}",
                                     f"avg:{service_name}.trigger.duration{{*}} by {{{breakdown_by}}}",
-                                    f"max:{service_name}.duration{{*}} by {{{breakdown_by}}}"
+                                    f"avg:{service_name}.trigger.avg_execution_time{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.avg_execution_time{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.execution_time{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.trigger.execution_time{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.trigger.avg_duration{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.avg_duration{{*}} by {{{breakdown_by}}}",
+                                    f"max:{service_name}.duration{{*}} by {{{breakdown_by}}}",
+                                    f"sum:{service_name}.duration{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.response_time{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.processing_time{{*}} by {{{breakdown_by}}}"
                                 ])
                             elif "number" in title_lower:
                                 metric_patterns.extend([
@@ -3427,6 +3436,188 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
 
     @mcp.tool()
+    async def datadog_trigger_duration_analysis(
+        service: str = "carma",
+        time_range: str = "24h",
+        organization: Optional[str] = None,
+        debug_mode: bool = False,
+        top_n: int = 10
+    ) -> str:
+        """DataDog Trigger Duration Analysis: Direct query for individual trigger duration breakdown for any service.
+        
+        Args:
+            service: Service name (e.g., carma, lambda, etc.)
+            time_range: Time range (1h, 24h, 7d, 30d)
+            organization: Optional organization filter
+            debug_mode: Show detailed debugging information
+            top_n: Number of top triggers to show by duration
+        """
+        logger.info(f"⏱️ Analyzing {service} trigger durations for {time_range}...")
+        
+        try:
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Parse time range
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            response = f"⏱️ **{service.upper()} TRIGGER DURATION BREAKDOWN**\n\n"
+            response += f"🏢 **Organization**: {organization or 'all'}\n"
+            response += f"⏰ **Time Range**: {time_range}\n\n"
+            
+            # Comprehensive list of duration metric patterns to try
+            duration_patterns = [
+                f"avg:{service}.duration{{*}} by {{trigger}}",
+                f"avg:{service}.trigger.duration{{*}} by {{trigger}}",
+                f"avg:{service}.trigger.avg_execution_time{{*}} by {{trigger}}",
+                f"avg:{service}.avg_execution_time{{*}} by {{trigger}}",
+                f"avg:{service}.execution_time{{*}} by {{trigger}}",
+                f"avg:{service}.trigger.execution_time{{*}} by {{trigger}}",
+                f"avg:{service}.trigger.avg_duration{{*}} by {{trigger}}",
+                f"avg:{service}.avg_duration{{*}} by {{trigger}}",
+                f"avg:{service}.response_time{{*}} by {{trigger}}",
+                f"avg:{service}.processing_time{{*}} by {{trigger}}",
+                f"avg:{service}.runtime{{*}} by {{trigger}}",
+                f"avg:{service}.trigger.runtime{{*}} by {{trigger}}",
+                f"max:{service}.duration{{*}} by {{trigger}}",
+                f"max:{service}.trigger.duration{{*}} by {{trigger}}",
+                f"sum:{service}.duration{{*}} by {{trigger}}",
+                f"sum:{service}.trigger.duration{{*}} by {{trigger}}"
+            ]
+            
+            # Add organization filter if specified
+            if organization:
+                duration_patterns = [pattern.replace("{*}", f"{{organization:{organization}}}") for pattern in duration_patterns]
+            
+            trigger_durations = {}
+            working_query = None
+            
+            for pattern in duration_patterns:
+                try:
+                    response += f"🔍 **Testing**: `{pattern}`\n"
+                    
+                    metrics_data = await metrics_client.query_metrics(
+                        query=pattern,
+                        start_time=int(start_time.timestamp()),
+                        end_time=int(end_time.timestamp())
+                    )
+                    
+                    if metrics_data.get('series') and len(metrics_data['series']) > 0:
+                        series_list = metrics_data['series']
+                        response += f"   ✅ **Found {len(series_list)} trigger series!**\n\n"
+                        working_query = pattern
+                        
+                        # Process each series
+                        errors = 0
+                        if debug_mode:
+                            response += f"   🐛 **DEBUG - Sample Series Data**:\n"
+                            for i, series in enumerate(series_list[:3]):  # Show first 3
+                                scope = series.get('scope', 'unknown')
+                                points = series.get('points', [])
+                                response += f"      Series {i+1}: scope='{scope}'\n"
+                                response += f"         Points count: {len(points)}\n"
+                                if points:
+                                    sample_point = points[-1]
+                                    point_type = type(sample_point).__name__
+                                    response += f"         Sample point: {point_type} = {sample_point}\n"
+                        
+                        for series in series_list:
+                            try:
+                                scope = series.get('scope', '')
+                                points = series.get('points', [])
+                                
+                                # Extract trigger name from scope
+                                trigger_name = "unknown"
+                                if 'trigger:' in scope:
+                                    trigger_part = [part for part in scope.split(',') if 'trigger:' in part]
+                                    if trigger_part:
+                                        trigger_name = trigger_part[0].replace('trigger:', '').strip()
+                                
+                                # Get duration value from the latest point
+                                if points:
+                                    latest_point = points[-1]
+                                    duration_value = None
+                                    
+                                    if isinstance(latest_point, dict):
+                                        duration_value = latest_point.get('value')
+                                    elif isinstance(latest_point, list) and len(latest_point) >= 2:
+                                        duration_value = latest_point[1]
+                                    elif hasattr(latest_point, 'value'):
+                                        duration_value = latest_point.value
+                                    
+                                    if duration_value is not None:
+                                        trigger_durations[trigger_name] = float(duration_value)
+                                
+                            except Exception as parse_error:
+                                errors += 1
+                                if debug_mode:
+                                    response += f"   ⚠️ **Parse Error**: {str(parse_error)}\n"
+                        
+                        response += f"   📊 **Processing Summary**: {len(series_list)} series processed, {errors} errors\n"
+                        response += f"   ✅ **Successfully extracted {len(trigger_durations)} triggers with duration data!**\n\n"
+                        break
+                    else:
+                        response += f"   📭 **No Data Found**\n"
+                        
+                except Exception as pattern_error:
+                    response += f"   ❌ **Pattern Failed**: {str(pattern_error)[:100]}...\n"
+            
+            # Display results
+            if trigger_durations:
+                sorted_triggers = sorted(trigger_durations.items(), key=lambda x: x[1], reverse=True)
+                total_duration = sum(trigger_durations.values())
+                
+                response += f"📊 **TOP TRIGGERS BY DURATION**:\n"
+                for i, (trigger, duration) in enumerate(sorted_triggers[:top_n], 1):
+                    percentage = (duration / total_duration * 100) if total_duration > 0 else 0
+                    
+                    # Format duration appropriately
+                    if duration < 60:
+                        duration_str = f"{duration:.2f}s"
+                    elif duration < 3600:
+                        duration_str = f"{duration/60:.2f}m"
+                    else:
+                        duration_str = f"{duration/3600:.2f}h"
+                    
+                    response += f"   {i:2d}. **{trigger}**: {duration_str} ({percentage:.1f}%) [avg]\n"
+                
+                # Add more triggers if requested
+                if len(sorted_triggers) > top_n:
+                    response += f"   ... and {len(sorted_triggers) - top_n} more triggers\n"
+                
+                response += f"\n⏱️ **TOTAL AVERAGE DURATION**: {total_duration:.2f}s\n"
+                response += f"🎯 **WORKING QUERY**: `{working_query}`\n"
+                
+                # Find the slowest trigger
+                if sorted_triggers:
+                    slowest_trigger, slowest_duration = sorted_triggers[0]
+                    response += f"🐌 **SLOWEST TRIGGER**: {slowest_trigger} ({slowest_duration:.2f}s)\n"
+                
+            else:
+                response += "📭 **No duration data found**.\n\n"
+                response += "💡 **Troubleshooting**:\n"
+                response += "• Verify the service name is correct\n"
+                response += "• Check if duration metrics exist for this service\n"
+                response += "• Try different time ranges\n"
+                response += "• Duration metrics might use different naming conventions\n"
+                response += "• Some services might not have trigger-level duration tracking\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Failed to get trigger duration analysis: {e}", "datadog")
+            return f"❌ Error getting trigger duration analysis: {str(e)}"
+
+    @mcp.tool()
     async def datadog_dashboard_universal_analyzer(
         dashboard_id: str,
         widget_filter: Optional[str] = None,
@@ -3683,3 +3874,252 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             logger.error(f"Universal dashboard analysis failed: {e}", "datadog")
             import traceback
             return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+
+    @mcp.tool()
+    async def datadog_dashboard_comprehensive_extractor(
+        dashboard_id: str,
+        time_range: str = "24h",
+        debug_mode: bool = False
+    ) -> str:
+        """DataDog Dashboard Comprehensive Extractor: Extract ALL types of metrics data from any dashboard.
+        
+        This tool systematically discovers and extracts ALL metrics from a dashboard including:
+        - Cost metrics (trigger costs, organization costs)  
+        - Duration metrics (average duration, execution time)
+        - Runtime metrics (hours per trigger, runtime hours)
+        - Usage metrics (counts, utilization)
+        - Performance metrics (latency, throughput)
+        
+        Args:
+            dashboard_id: Dashboard ID to analyze comprehensively
+            time_range: Time range (1h, 24h, 7d, 30d)
+            debug_mode: Show detailed debugging information
+        """
+        logger.info(f"🔍 Comprehensively extracting ALL metrics from dashboard {dashboard_id}...")
+        
+        try:
+            client = datadog_provider.get_client("dashboards")
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Get dashboard structure
+            dashboard = await client.get_dashboard(dashboard_id)
+            if not dashboard or 'widgets' not in dashboard:
+                return f"❌ Dashboard {dashboard_id} not found or has no widgets"
+            
+            # Parse time range
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            response = f"🔍 **COMPREHENSIVE DASHBOARD METRICS EXTRACTION**\n\n"
+            response += f"📊 **Dashboard**: {dashboard.get('title', 'Unknown')} (ID: {dashboard_id})\n"
+            response += f"📈 **Total Widgets**: {len(dashboard['widgets'])}\n"
+            response += f"⏰ **Time Range**: {time_range}\n\n"
+            
+            # Comprehensive metric patterns to test
+            all_metric_patterns = {
+                'carma': [
+                    # Cost patterns
+                    "sum:carma.trigger.cost{*} by {trigger}",
+                    "sum:carma.trigger.cost{*} by {organization}",
+                    "sum:carma.organization.cost{*} by {organization}",
+                    "sum:carma.cost{*} by {trigger}",
+                    "sum:carma.cost{*} by {organization}",
+                    "avg:carma.trigger.cost{*} by {trigger}",
+                    
+                    # Duration patterns  
+                    "avg:carma.trigger.duration{*} by {trigger}",
+                    "avg:carma.duration{*} by {trigger}",
+                    "avg:carma.trigger.avg_execution_time{*} by {trigger}",
+                    "avg:carma.avg_execution_time{*} by {trigger}",
+                    "avg:carma.execution_time{*} by {trigger}",
+                    "avg:carma.trigger.execution_time{*} by {trigger}",
+                    "avg:carma.trigger.avg_duration{*} by {trigger}",
+                    "avg:carma.avg_duration{*} by {trigger}",
+                    "avg:carma.response_time{*} by {trigger}",
+                    "avg:carma.processing_time{*} by {trigger}",
+                    "max:carma.trigger.duration{*} by {trigger}",
+                    "max:carma.duration{*} by {trigger}",
+                    "sum:carma.trigger.duration{*} by {trigger}",
+                    "sum:carma.duration{*} by {trigger}",
+                    
+                    # Runtime patterns
+                    "sum:carma.runtime.hours{*} by {trigger}",
+                    "sum:carma.runtime.hours{*} by {organization}",
+                    "avg:carma.runtime{*} by {trigger}",
+                    "avg:carma.runtime{*} by {organization}",
+                    "sum:carma.hours{*} by {trigger}",
+                    "sum:carma.hours{*} by {organization}",
+                    "avg:carma.trigger.runtime{*} by {trigger}",
+                    
+                    # Usage/Count patterns
+                    "count:carma.trigger{*} by {trigger}",
+                    "count:carma.trigger{*} by {organization}",
+                    "sum:carma.trigger.count{*} by {trigger}",
+                    "sum:carma.count{*} by {trigger}",
+                    "sum:carma.usage{*} by {trigger}",
+                    "sum:carma.usage{*} by {organization}",
+                    
+                    # Tenant/Organization patterns
+                    "count:carma.tenants{*}",
+                    "count_nonzero:carma.trigger{*} by {organization}",
+                    
+                    # Performance patterns
+                    "avg:carma.cpu.usage{*} by {trigger}",
+                    "avg:carma.memory.usage{*} by {trigger}",
+                    "avg:carma.latency{*} by {trigger}",
+                    "avg:carma.throughput{*} by {trigger}"
+                ]
+            }
+            
+            all_results = {}
+            working_queries = []
+            
+            # Test all patterns
+            for service, patterns in all_metric_patterns.items():
+                response += f"🔍 **Testing {service.upper()} Metrics**\n\n"
+                
+                for pattern in patterns:
+                    try:
+                        if debug_mode:
+                            response += f"   🧪 Testing: `{pattern}`\n"
+                        
+                        metrics_data = await metrics_client.query_metrics(
+                            query=pattern,
+                            start_time=int(start_time.timestamp()),
+                            end_time=int(end_time.timestamp())
+                        )
+                        
+                        if metrics_data.get('series') and len(metrics_data['series']) > 0:
+                            series_list = metrics_data['series']
+                            
+                            # Determine metric type from pattern
+                            metric_type = "Unknown"
+                            unit = ""
+                            if 'cost' in pattern:
+                                metric_type = "Cost"
+                                unit = "$"
+                            elif 'duration' in pattern or 'execution_time' in pattern:
+                                metric_type = "Duration" 
+                                unit = "s"
+                            elif 'runtime' in pattern or 'hours' in pattern:
+                                metric_type = "Runtime"
+                                unit = "h"
+                            elif 'count' in pattern or 'usage' in pattern:
+                                metric_type = "Count/Usage"
+                                unit = ""
+                            elif 'cpu' in pattern or 'memory' in pattern:
+                                metric_type = "Performance"
+                                unit = "%"
+                            elif 'latency' in pattern or 'response_time' in pattern:
+                                metric_type = "Latency"
+                                unit = "ms"
+                                
+                            # Determine breakdown dimension
+                            breakdown_by = "organization"
+                            if "by {trigger}" in pattern:
+                                breakdown_by = "trigger"
+                            elif "by {organization}" in pattern:
+                                breakdown_by = "organization"
+                            elif "by {host}" in pattern:
+                                breakdown_by = "host"
+                                
+                            response += f"   ✅ **FOUND DATA**: {metric_type} by {breakdown_by} ({len(series_list)} series)\n"
+                            working_queries.append(pattern)
+                            
+                            # Extract and format data
+                            item_values = {}
+                            for series in series_list:
+                                scope = series.get('scope', '')
+                                points = series.get('points', [])
+                                
+                                # Extract item name from scope
+                                item_name = "unknown"
+                                if f'{breakdown_by}:' in scope:
+                                    for part in scope.split(','):
+                                        if f'{breakdown_by}:' in part:
+                                            item_name = part.replace(f'{breakdown_by}:', '').strip()
+                                            break
+                                
+                                # Get latest value
+                                if points:
+                                    latest_point = points[-1]
+                                    value = None
+                                    
+                                    if isinstance(latest_point, dict):
+                                        value = latest_point.get('value')
+                                    elif isinstance(latest_point, list) and len(latest_point) >= 2:
+                                        value = latest_point[1]
+                                    
+                                    if value is not None:
+                                        item_values[item_name] = float(value)
+                            
+                            # Store and display results
+                            if item_values:
+                                sorted_items = sorted(item_values.items(), key=lambda x: x[1], reverse=True)
+                                total_value = sum(item_values.values())
+                                
+                                result_key = f"{metric_type}_{breakdown_by}"
+                                all_results[result_key] = {
+                                    'type': metric_type,
+                                    'breakdown': breakdown_by,
+                                    'unit': unit,
+                                    'query': pattern,
+                                    'data': sorted_items,
+                                    'total': total_value
+                                }
+                                
+                                response += f"      📊 **Top 10 {metric_type} by {breakdown_by.title()}**:\n"
+                                for i, (item, value) in enumerate(sorted_items[:10], 1):
+                                    if metric_type == "Duration":
+                                        # Format duration appropriately
+                                        if value < 60:
+                                            value_str = f"{value:.2f}s"
+                                        elif value < 3600:
+                                            value_str = f"{value/60:.2f}m"
+                                        else:
+                                            value_str = f"{value/3600:.2f}h"
+                                    else:
+                                        value_str = f"{unit}{value:.2f}"
+                                    
+                                    response += f"         {i:2d}. {item}: {value_str}\n"
+                                
+                                response += f"      📈 **Total**: {unit}{total_value:.2f}\n"
+                                response += "\n"
+                        
+                        elif debug_mode:
+                            response += f"   📭 No data\n"
+                            
+                    except Exception as e:
+                        if debug_mode:
+                            response += f"   ❌ Error: {str(e)[:50]}...\n"
+            
+            # Summary of all findings
+            response += f"📋 **EXTRACTION SUMMARY**\n\n"
+            response += f"🔍 **Working Queries Found**: {len(working_queries)}\n"
+            response += f"📊 **Data Types Extracted**: {len(all_results)}\n\n"
+            
+            if all_results:
+                response += f"🎯 **Available Data Types**:\n"
+                for key, result in all_results.items():
+                    response += f"   ✅ {result['type']} by {result['breakdown'].title()}: {len(result['data'])} items\n"
+                
+                response += f"\n🔧 **Working Queries**:\n"
+                for query in working_queries:
+                    response += f"   • `{query}`\n"
+            else:
+                response += "❌ **No metric data found**. Dashboard may use log-based widgets or custom metrics.\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Dashboard comprehensive extraction failed: {e}", provider="datadog")
+            return f"❌ Error in comprehensive extraction: {str(e)}"
