@@ -65,7 +65,8 @@ class Config:
     
     def _parse_enabled_providers(self) -> Set[str]:
         """Parse enabled providers from environment variable."""
-        providers_str = os.environ.get('ENABLED_PROVIDERS', 'aws')
+        # Check both AUTOCOST_PROVIDERS (our standard) and ENABLED_PROVIDERS (fallback)
+        providers_str = os.environ.get('AUTOCOST_PROVIDERS') or os.environ.get('ENABLED_PROVIDERS', 'aws')
         return set(provider.strip().lower() for provider in providers_str.split(','))
     
     @property

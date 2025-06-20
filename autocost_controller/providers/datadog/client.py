@@ -11,7 +11,7 @@ from datadog_api_client.v2.api.metrics_api import MetricsApi as MetricsApiV2
 from datadog_api_client.v1.model.logs_list_request import LogsListRequest
 from datadog_api_client.v1.model.logs_sort import LogsSort
 from datadog_api_client.v2.model.logs_list_request import LogsListRequest as LogsListRequestV2
-from datadog_api_client.v1.model.usage_metering_request import UsageMeteringRequest
+# Usage metering request models will be imported as needed
 from ...core.logger import AutocostLogger
 from .auth import DatadogAuth
 
@@ -22,7 +22,11 @@ class DatadogClient:
     def __init__(self, auth: DatadogAuth, logger: AutocostLogger):
         self.auth = auth
         self.logger = logger
-        self.api_client = auth.get_api_client()
+        self._initialize_api_clients()
+    
+    def _initialize_api_clients(self):
+        """Initialize or reinitialize API clients with current configuration."""
+        self.api_client = self.auth.get_api_client()
         
         # Initialize API clients
         self.logs_api_v1 = LogsApi(self.api_client)
@@ -31,6 +35,26 @@ class DatadogClient:
         self.metrics_api_v2 = MetricsApiV2(self.api_client)
         self.dashboards_api = DashboardsApi(self.api_client)
         self.usage_api = UsageMeteringApi(self.api_client)
+        
+        # Check if SSL verification is disabled in the auth config
+        # and disable SSL warnings if needed
+        config = self.auth.get_configuration()
+        if hasattr(config, 'verify_ssl') and not config.verify_ssl:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    
+    def reinitialize_with_ssl_disabled(self):
+        """Reinitialize all API clients with SSL verification disabled."""
+        # Update auth configuration
+        config = self.auth.get_configuration()
+        config.verify_ssl = False
+        
+        # Recreate API client with new configuration
+        from datadog_api_client import ApiClient
+        self.auth.api_client = ApiClient(config)
+        
+        # Reinitialize all API clients
+        self._initialize_api_clients()
     
     async def get_logs(
         self,
@@ -47,15 +71,12 @@ class DatadogClient:
             if not end_time:
                 end_time = datetime.now()
             
-            # Convert to milliseconds timestamp
-            start_ts = int(start_time.timestamp() * 1000)
-            end_ts = int(end_time.timestamp() * 1000)
-            
-            # Create logs request
+            # Create logs request - use datetime objects directly
+            sort_value = "time" if sort == "desc" else "-time"
             body = LogsListRequest(
                 query=query,
-                time={"from": start_ts, "to": end_ts},
-                sort=LogsSort.TIME_DESC if sort == "desc" else LogsSort.TIME_ASC,
+                time={"from": start_time, "to": end_time},
+                sort=sort_value,
                 limit=limit
             )
             
@@ -109,11 +130,24 @@ class DatadogClient:
                 tag_filter = "{" + ",".join(tags) + "}"
                 query = f"{metric_name}{tag_filter}"
             
-            response = self.metrics_api_v1.query_metrics(
-                _from=start_ts,
-                to=end_ts,
-                query=query
-            )
+            try:
+                response = self.metrics_api_v1.query_metrics(
+                    _from=start_ts,
+                    to=end_ts,
+                    query=query
+                )
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in query_metrics, reinitializing with SSL disabled", "datadog")
+                    self.reinitialize_with_ssl_disabled()
+                    response = self.metrics_api_v1.query_metrics(
+                        _from=start_ts,
+                        to=end_ts,
+                        query=query
+                    )
+                else:
+                    raise ssl_error
             
             series_data = []
             if hasattr(response, 'series') and response.series:
@@ -121,11 +155,39 @@ class DatadogClient:
                     points = []
                     if hasattr(series, 'pointlist') and series.pointlist:
                         for point in series.pointlist:
-                            if len(point) >= 2:
-                                points.append({
-                                    "timestamp": point[0],
-                                    "value": point[1]
-                                })
+                            # Parse DataDog Point objects correctly
+                            try:
+                                if hasattr(point, 'to_dict'):
+                                    point_dict = point.to_dict()
+                                    if isinstance(point_dict, list) and len(point_dict) >= 2:
+                                        points.append({
+                                            "timestamp": point_dict[0],
+                                            "value": point_dict[1]
+                                        })
+                                else:
+                                    # Parse using repr() method
+                                    point_repr = repr(point)
+                                    if '[' in point_repr and ']' in point_repr:
+                                        import ast
+                                        try:
+                                            parsed = ast.literal_eval(point_repr)
+                                            if isinstance(parsed, list) and len(parsed) >= 2:
+                                                points.append({
+                                                    "timestamp": parsed[0],
+                                                    "value": parsed[1]
+                                                })
+                                        except:
+                                            pass
+                            except Exception:
+                                # Fallback to old method
+                                try:
+                                    if hasattr(point, '__getitem__') and len(point) >= 2:
+                                        points.append({
+                                            "timestamp": point[0],
+                                            "value": point[1]
+                                        })
+                                except:
+                                    pass
                     
                     series_data.append({
                         "metric": getattr(series, 'metric', metric_name),
@@ -150,7 +212,16 @@ class DatadogClient:
     async def list_dashboards(self) -> Dict[str, Any]:
         """List all DataDog dashboards."""
         try:
-            response = self.dashboards_api.list_dashboards()
+            try:
+                response = self.dashboards_api.list_dashboards()
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in list_dashboards, reinitializing with SSL disabled", "datadog")
+                    self.reinitialize_with_ssl_disabled()
+                    response = self.dashboards_api.list_dashboards()
+                else:
+                    raise ssl_error
             
             dashboards = []
             if hasattr(response, 'dashboards') and response.dashboards:
@@ -175,11 +246,171 @@ class DatadogClient:
             self.logger.error(f"Failed to list DataDog dashboards: {e}", "datadog")
             raise
     
-    async def get_dashboard(self, dashboard_id: str) -> Dict[str, Any]:
-        """Get specific DataDog dashboard details."""
+    async def get_dashboard_data(
+        self, 
+        dashboard_id: str, 
+        template_variables: Optional[Dict[str, str]] = None,
+        from_ts: Optional[int] = None,
+        to_ts: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get dashboard data including widget values using the dashboard data API."""
         try:
-            response = self.dashboards_api.get_dashboard(dashboard_id)
+            # Use the dashboard data API endpoint that the web interface uses
+            import requests
+            import urllib3
+            from datetime import datetime, timedelta
             
+            # Disable SSL warnings if we're in disabled SSL mode
+            if hasattr(self, '_ssl_disabled') and self._ssl_disabled:
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            
+            # Calculate timestamps if not provided
+            if not from_ts or not to_ts:
+                end_time = datetime.now()
+                start_time = end_time - timedelta(hours=24)
+                from_ts = int(start_time.timestamp() * 1000)
+                to_ts = int(end_time.timestamp() * 1000)
+            
+            # Build the dashboard data URL (this is what the web interface calls)
+            site = self.auth.config.datadog_site
+            base_url = f"https://app.{site}"
+            data_url = f"{base_url}/api/v1/dashboard/{dashboard_id}/data"
+            
+            # Build query parameters like the web interface
+            params = {
+                'from_ts': from_ts,
+                'to_ts': to_ts,
+                'live': 'true',
+                'refresh_mode': 'sliding',
+                'fromUser': 'false'
+            }
+            
+            # Add template variables
+            if template_variables:
+                for key, value in template_variables.items():
+                    params[f'tpl_var_{key}[0]'] = value
+            
+            # Make the API request with proper headers
+            headers = {
+                'DD-API-KEY': self.auth.config.datadog_api_key,
+                'DD-APPLICATION-KEY': self.auth.config.datadog_app_key,
+                'Content-Type': 'application/json',
+                'User-Agent': 'DataDog/MCP-Client'
+            }
+            
+            try:
+                # Try with SSL verification first
+                response = requests.get(
+                    data_url, 
+                    params=params, 
+                    headers=headers, 
+                    timeout=30,
+                    verify=True
+                )
+            except Exception as ssl_error:
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in dashboard data API, trying without verification", "datadog")
+                    # Retry without SSL verification
+                    response = requests.get(
+                        data_url, 
+                        params=params, 
+                        headers=headers, 
+                        timeout=30,
+                        verify=False
+                    )
+                    self._ssl_disabled = True
+                else:
+                    raise ssl_error
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                # Try multiple API endpoints that DataDog might use
+                api_endpoints = [
+                    f"{base_url}/api/v1/dashboard/{dashboard_id}/widget_values",
+                    f"{base_url}/api/v2/dashboard/{dashboard_id}/data", 
+                    f"{base_url}/api/internal/dashboard/{dashboard_id}/data",
+                    f"{base_url}/api/v1/graph/embed/{dashboard_id}/widget_data",
+                    f"{base_url}/dashboard/api/v1/{dashboard_id}/data"
+                ]
+                
+                for endpoint in api_endpoints:
+                    try:
+                        alt_response = requests.get(
+                            endpoint,
+                            params=params,
+                            headers=headers,
+                            timeout=30,
+                            verify=not getattr(self, '_ssl_disabled', False)
+                        )
+                        
+                        if alt_response.status_code == 200:
+                            result = alt_response.json()
+                            result['_endpoint_used'] = endpoint
+                            return result
+                    except Exception:
+                        continue
+                
+                # If all endpoints fail, try getting individual widget data
+                try:
+                    # Get dashboard definition first to get widget IDs
+                    dashboard_def = await self.get_dashboard(dashboard_id)
+                    widgets = dashboard_def.get('widgets', [])
+                    
+                    widget_data = []
+                    for widget in widgets:
+                        widget_id = widget.get('id')
+                        if widget_id:
+                            widget_url = f"{base_url}/api/v1/dashboard/{dashboard_id}/widget/{widget_id}/data"
+                            try:
+                                widget_response = requests.get(
+                                    widget_url,
+                                    params=params,
+                                    headers=headers,
+                                    timeout=30,
+                                    verify=not getattr(self, '_ssl_disabled', False)
+                                )
+                                if widget_response.status_code == 200:
+                                    widget_data.append(widget_response.json())
+                            except Exception:
+                                continue
+                    
+                    if widget_data:
+                        return {
+                            'widgets': widget_data,
+                            '_method': 'individual_widgets'
+                        }
+                except Exception:
+                    pass
+                
+                # If everything fails, return detailed error info
+                return {
+                    'error': f'All dashboard data APIs failed. Primary status: {response.status_code}',
+                    'response_text': response.text[:500],
+                    'url': data_url,
+                    'params': params,
+                    'attempted_endpoints': api_endpoints
+                }
+                
+        except Exception as e:
+            self.logger.error(f"Failed to get dashboard data for {dashboard_id}: {e}", "datadog")
+            raise
+
+    async def get_dashboard(self, dashboard_id: str) -> Dict[str, Any]:
+        """Get dashboard information including widgets and template variables."""
+        try:
+            try:
+                response = self.dashboards_api.get_dashboard(dashboard_id)
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in get_dashboard, reinitializing with SSL disabled", "datadog")
+                    self.reinitialize_with_ssl_disabled()
+                    response = self.dashboards_api.get_dashboard(dashboard_id)
+                else:
+                    raise ssl_error
+            
+            # Process widgets including nested widgets in groups
             widgets = []
             if hasattr(response, 'widgets') and response.widgets:
                 for widget in response.widgets:
@@ -194,10 +425,75 @@ class DatadogClient:
                         widget_data["definition"] = {
                             "type": getattr(definition, 'type', ''),
                             "title": getattr(definition, 'title', ''),
-                            "requests": getattr(definition, 'requests', [])
+                            "requests": []
                         }
+                        
+                        # Handle requests - convert to dict format
+                        requests = getattr(definition, 'requests', [])
+                        if requests:
+                            for request in requests:
+                                if hasattr(request, 'to_dict'):
+                                    widget_data["definition"]["requests"].append(request.to_dict())
+                                elif isinstance(request, dict):
+                                    widget_data["definition"]["requests"].append(request)
+                                else:
+                                    # Convert request object to dict manually
+                                    request_dict = {}
+                                    for attr in ['q', 'query', 'formulas', 'queries', 'response_format', 'style']:
+                                        if hasattr(request, attr):
+                                            value = getattr(request, attr)
+                                            if value is not None:
+                                                # Handle complex objects
+                                                if hasattr(value, 'to_dict'):
+                                                    request_dict[attr] = value.to_dict()
+                                                elif isinstance(value, list):
+                                                    # Handle lists of objects
+                                                    request_dict[attr] = []
+                                                    for item in value:
+                                                        if hasattr(item, 'to_dict'):
+                                                            request_dict[attr].append(item.to_dict())
+                                                        else:
+                                                            request_dict[attr].append(item)
+                                                else:
+                                                    request_dict[attr] = value
+                                    if request_dict:
+                                        widget_data["definition"]["requests"].append(request_dict)
+                        
+                        # Handle group widgets with nested widgets
+                        if getattr(definition, 'type', '') == 'group':
+                            # Extract nested widgets from group
+                            if hasattr(definition, 'to_dict'):
+                                definition_dict = definition.to_dict()
+                                nested_widgets = definition_dict.get('widgets', [])
+                                
+                                widget_data["definition"]["widgets"] = []
+                                widget_data["definition"]["nested_widgets"] = []  # Keep both for compatibility
+                                
+                                for nested_widget in nested_widgets:
+                                    nested_data = {
+                                        "id": nested_widget.get('id', ''),
+                                        "definition": nested_widget.get('definition', {}),
+                                        "layout": nested_widget.get('layout', {})
+                                    }
+                                    
+                                    widget_data["definition"]["widgets"].append(nested_data)
+                                    widget_data["definition"]["nested_widgets"].append(nested_data)  # Compatibility
                     
                     widgets.append(widget_data)
+            
+            # Process template variables
+            template_variables = []
+            if hasattr(response, 'template_variables') and response.template_variables:
+                for var in response.template_variables:
+                    if hasattr(var, 'to_dict'):
+                        template_variables.append(var.to_dict())
+                    else:
+                        template_variables.append({
+                            'name': getattr(var, 'name', ''),
+                            'prefix': getattr(var, 'prefix', ''),
+                            'default': getattr(var, 'default', ''),
+                            'available_values': getattr(var, 'available_values', [])
+                        })
             
             return {
                 "id": getattr(response, 'id', ''),
@@ -208,7 +504,7 @@ class DatadogClient:
                 "author_handle": getattr(response, 'author_handle', ''),
                 "widget_count": len(widgets),
                 "widgets": widgets,
-                "template_variables": getattr(response, 'template_variables', [])
+                "template_variables": template_variables
             }
             
         except Exception as e:

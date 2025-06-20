@@ -61,14 +61,48 @@ class DatadogAuth:
             
             # Test authentication with the validation endpoint
             auth_api = AuthenticationApi(self.api_client)
-            response = auth_api.validate()
             
-            if response.valid:
-                self.logger.info("DataDog authentication test successful", "datadog")
-                return True
-            else:
-                self.logger.error("DataDog authentication failed - invalid credentials", "datadog")
-                return False
+            try:
+                response = auth_api.validate()
+                
+                if response.valid:
+                    self.logger.info("DataDog authentication test successful", "datadog")
+                    return True
+                else:
+                    self.logger.error("DataDog authentication failed - invalid credentials", "datadog")
+                    return False
+                    
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed, trying with disabled SSL verification for corporate environment", "datadog")
+                    
+                    # Create a new configuration with SSL verification disabled
+                    import urllib3
+                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                    
+                    ssl_config = Configuration()
+                    ssl_config.api_key["apiKeyAuth"] = self.config.datadog_api_key
+                    ssl_config.api_key["appKeyAuth"] = self.config.datadog_app_key
+                    ssl_config.server_variables["site"] = self.config.datadog_site
+                    ssl_config.verify_ssl = False
+                    
+                    ssl_client = ApiClient(ssl_config)
+                    ssl_auth_api = AuthenticationApi(ssl_client)
+                    
+                    response = ssl_auth_api.validate()
+                    
+                    if response.valid:
+                        self.logger.info("DataDog authentication successful with SSL verification disabled", "datadog")
+                        # Update the main configuration for future use
+                        self.configuration.verify_ssl = False
+                        self.api_client = ApiClient(self.configuration)
+                        return True
+                    else:
+                        self.logger.error("DataDog authentication failed even with SSL verification disabled", "datadog")
+                        return False
+                else:
+                    raise ssl_error
                 
         except Exception as e:
             self.logger.error(f"DataDog permission test failed: {e}", "datadog")

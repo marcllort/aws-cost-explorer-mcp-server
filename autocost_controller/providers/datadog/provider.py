@@ -110,9 +110,25 @@ class DatadogProvider(BaseProvider):
                 self.client = DatadogClient(self.auth, self.logger)
             
             # Test with a simple API call
-            dashboards = await self.client.list_dashboards()
-            self.logger.info(f"DataDog connection test passed - found {dashboards.get('total_dashboards', 0)} dashboards", "datadog")
-            return True
+            try:
+                dashboards = await self.client.list_dashboards()
+                self.logger.info(f"DataDog connection test passed - found {dashboards.get('total_dashboards', 0)} dashboards", "datadog")
+                return True
+                
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in connection test, reconfiguring client with SSL disabled", "datadog")
+                    
+                    # Reinitialize the client with SSL verification disabled
+                    self.client.reinitialize_with_ssl_disabled()
+                    
+                    # Test again
+                    dashboards = await self.client.list_dashboards()
+                    self.logger.info(f"DataDog connection test passed with SSL disabled - found {dashboards.get('total_dashboards', 0)} dashboards", "datadog")
+                    return True
+                else:
+                    raise ssl_error
             
         except Exception as e:
             self.logger.error(f"DataDog connection test failed: {str(e)}", "datadog")

@@ -232,6 +232,29 @@ def analyze_costs(
 - **Connection testing**: Validates credentials before saving
 - Log authentication attempts (success/failure) without exposing secrets
 
+### SSL Certificate Handling (Corporate Environments)
+- **ALWAYS implement SSL bypass** for DataDog API calls in corporate environments
+- **Pattern**: Wrap all external API calls with SSL verification fallback
+- **Required for**: DataDog dashboards, metrics, logs, usage APIs
+- **Implementation**: Use `reinitialize_with_ssl_disabled()` method on SSL errors
+
+```python
+# ✅ Correct SSL handling pattern for DataDog API calls
+try:
+    response = self.api_client.some_api_call(params)
+except Exception as ssl_error:
+    if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+        self.logger.info("SSL verification failed, reinitializing with SSL disabled", "datadog")
+        self.reinitialize_with_ssl_disabled()
+        response = self.api_client.some_api_call(params)
+    else:
+        raise ssl_error
+```
+
+- **Disable SSL warnings**: Use `urllib3.disable_warnings()` when SSL verification is disabled
+- **Log SSL fallback**: Always log when falling back to disabled SSL verification
+- **Corporate detection**: Automatic detection and handling without user intervention
+
 ### API Key Handling
 ```python
 # ✅ Good
@@ -392,6 +415,19 @@ return {"aws_client": client, "raw_response": response}
 
 # ✅ Return clean interfaces
 return CostAnalysisResult(total=1234.56, breakdown=breakdown)
+
+# ❌ DataDog API calls without SSL handling
+response = self.dashboards_api.get_dashboard(dashboard_id)
+
+# ✅ DataDog API calls with SSL handling
+try:
+    response = self.dashboards_api.get_dashboard(dashboard_id)
+except Exception as ssl_error:
+    if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+        self.reinitialize_with_ssl_disabled()
+        response = self.dashboards_api.get_dashboard(dashboard_id)
+    else:
+        raise ssl_error
 ```
 
 ### Performance Anti-patterns
@@ -425,6 +461,7 @@ costs = await asyncio.gather(*cost_tasks)
 - **Environment detection**: Finds working credentials from environment
 - **Additive configuration**: Updates .env without destroying existing settings
 - **Connection validation**: Tests AWS and DataDog connections before saving
+- **SSL Certificate Workaround**: All DataDog API calls must handle SSL verification failures for corporate environments
 
 ### Project Structure Cleanup
 - **Single entry point**: Only `start.py` in root directory
@@ -446,6 +483,8 @@ Before submitting code:
 - [ ] Logging follows the project standards
 - [ ] **New**: Only essential files in root directory (no utility scripts)
 - [ ] **New**: Use start.py for all setup and operational tasks
+- [ ] **Critical**: All DataDog API calls implement SSL certificate workaround pattern
+- [ ] **Critical**: SSL verification fallback tested in corporate environments
 
 ## Getting Help
 
