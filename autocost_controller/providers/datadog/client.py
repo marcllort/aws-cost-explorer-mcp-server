@@ -599,4 +599,92 @@ class DatadogClient:
             
         except Exception as e:
             self.logger.error(f"Failed to get aggregated logs: {e}", "datadog")
+            raise
+    
+    async def query_metrics(
+        self,
+        query: str,
+        start_time: int,
+        end_time: int
+    ) -> Dict[str, Any]:
+        """Query metrics using full DataDog query syntax with grouping support."""
+        try:
+            try:
+                response = self.metrics_api_v1.query_metrics(
+                    _from=start_time,
+                    to=end_time,
+                    query=query
+                )
+            except Exception as ssl_error:
+                # Handle SSL certificate verification issues (corporate environments)
+                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(ssl_error):
+                    self.logger.info("SSL verification failed in query_metrics, reinitializing with SSL disabled", "datadog")
+                    self.reinitialize_with_ssl_disabled()
+                    response = self.metrics_api_v1.query_metrics(
+                        _from=start_time,
+                        to=end_time,
+                        query=query
+                    )
+                else:
+                    raise ssl_error
+            
+            series_data = []
+            if hasattr(response, 'series') and response.series:
+                for series in response.series:
+                    points = []
+                    if hasattr(series, 'pointlist') and series.pointlist:
+                        for point in series.pointlist:
+                            # Parse DataDog Point objects correctly
+                            try:
+                                if hasattr(point, 'to_dict'):
+                                    point_dict = point.to_dict()
+                                    if isinstance(point_dict, list) and len(point_dict) >= 2:
+                                        points.append({
+                                            "timestamp": point_dict[0],
+                                            "value": point_dict[1]
+                                        })
+                                else:
+                                    # Parse using repr() method
+                                    point_repr = repr(point)
+                                    if '[' in point_repr and ']' in point_repr:
+                                        import ast
+                                        try:
+                                            parsed = ast.literal_eval(point_repr)
+                                            if isinstance(parsed, list) and len(parsed) >= 2:
+                                                points.append({
+                                                    "timestamp": parsed[0],
+                                                    "value": parsed[1]
+                                                })
+                                        except:
+                                            pass
+                            except Exception:
+                                # Fallback to old method
+                                try:
+                                    if hasattr(point, '__getitem__') and len(point) >= 2:
+                                        points.append({
+                                            "timestamp": point[0],
+                                            "value": point[1]
+                                        })
+                                except:
+                                    pass
+                    
+                    # Extract scope for grouping
+                    scope = getattr(series, 'scope', '')
+                    
+                    series_data.append({
+                        "metric": getattr(series, 'metric', ''),
+                        "tags": getattr(series, 'tag_set', []),
+                        "display_name": getattr(series, 'display_name', ''),
+                        "unit": getattr(series, 'unit', None),
+                        "scope": scope,
+                        "points": points
+                    })
+            
+            return {
+                "query": query,
+                "series": series_data
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to query DataDog metrics: {e}", "datadog")
             raise 

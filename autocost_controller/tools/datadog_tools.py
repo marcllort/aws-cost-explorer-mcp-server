@@ -1,6 +1,6 @@
 """DataDog-specific tools for the Autocost Controller."""
 
-from typing import Optional, List
+from typing import Optional, List, Union, Dict, Any
 from datetime import datetime, timedelta
 import json
 
@@ -1643,6 +1643,439 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             return f"❌ Error getting actual dashboard data: {str(e)}"
 
     @mcp.tool()
+    async def datadog_discover_cost_metrics(
+        search_pattern: str = "cost",
+        organization_filter: Optional[str] = None,
+        time_range: str = "24h"
+    ) -> str:
+        """DataDog Cost Metrics Discovery: Find all available cost-related metrics in your DataDog account."""
+        logger.info(f"🔍 Discovering DataDog cost metrics with pattern: {search_pattern}...")
+        
+        try:
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Parse time range
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            response = f"🔍 **DATADOG COST METRICS DISCOVERY**\n\n"
+            response += f"🎯 **Search Pattern**: {search_pattern}\n"
+            response += f"⏰ **Time Range**: {time_range}\n"
+            if organization_filter:
+                response += f"🏢 **Organization Filter**: {organization_filter}\n"
+            response += "\n"
+            
+            discovered_metrics = []
+            total_tested = 0
+            
+            # Comprehensive search patterns for cost-related metrics
+            search_patterns = [search_pattern]
+            if search_pattern == "cost":
+                search_patterns.extend(['billing', 'expense', 'spend', 'price', 'charge'])
+            
+            # Common service prefixes to test
+            service_prefixes = [
+                'datawarehouse', 'analytics', 'treasury', 'carma', 'whatif',
+                'compute', 'storage', 'network', 'database', 'lambda', 'function',
+                'ec2', 'rds', 's3', 'cloudfront', 'elb', 'api_gateway', 'dynamodb',
+                'application', 'service', 'infrastructure', 'platform', 'system',
+                'aws', 'gcp', 'azure', 'cloud', 'container', 'kubernetes', 'docker'
+            ]
+            
+            # Metric aggregation functions
+            aggregations = ['sum', 'avg', 'max', 'min', 'count']
+            
+            response += "🔍 **Searching for Cost Metrics**:\n\n"
+            
+            for pattern in search_patterns:
+                response += f"**Pattern: '{pattern}'**\n"
+                
+                # Test different metric structures
+                metric_structures = [
+                    f"*.organization.{pattern}",
+                    f"*.{pattern}",
+                    f"{pattern}.*",
+                    f"*.*.{pattern}",
+                    f"{pattern}.organization.*",
+                    f"organization.{pattern}.*"
+                ]
+                
+                for structure in metric_structures:
+                    for agg in aggregations:
+                        # Build metric query
+                        base_metric = f"{agg}:{structure}"
+                        
+                        if organization_filter:
+                            metric_query = f"{base_metric}{{organization:{organization_filter}}}"
+                        else:
+                            metric_query = f"{base_metric}{{*}}"
+                        
+                        total_tested += 1
+                        
+                        try:
+                            # Test if metric exists and has data
+                            metrics_data = await metrics_client.get_metrics(
+                                metric_name=metric_query,
+                                start_time=start_time,
+                                end_time=end_time
+                            )
+                            
+                            if metrics_data.get('series') and len(metrics_data['series']) > 0:
+                                series = metrics_data['series'][0]
+                                if series.get('points') and len(series['points']) > 0:
+                                    # Extract service name
+                                    service_name = "unknown"
+                                    try:
+                                        metric_parts = structure.split('.')
+                                        if len(metric_parts) > 0 and '*' not in metric_parts[0]:
+                                            service_name = metric_parts[0]
+                                        elif len(metric_parts) > 1 and '*' not in metric_parts[1]:
+                                            service_name = metric_parts[1]
+                                    except:
+                                        pass
+                                    
+                                    # Calculate latest value
+                                    latest_value = 0
+                                    try:
+                                        point = series['points'][-1]
+                                        if hasattr(point, 'value'):
+                                            latest_value = point.value
+                                        elif isinstance(point, dict) and 'value' in point:
+                                            latest_value = point['value']
+                                        elif isinstance(point, list) and len(point) >= 2:
+                                            latest_value = point[1]
+                                        else:
+                                            import ast
+                                            parsed = ast.literal_eval(str(point))
+                                            if isinstance(parsed, list) and len(parsed) >= 2:
+                                                latest_value = parsed[1]
+                                    except:
+                                        latest_value = 0
+                                    
+                                    discovered_metrics.append({
+                                        'query': metric_query,
+                                        'metric': series['metric'],
+                                        'service': service_name,
+                                        'latest_value': latest_value,
+                                        'points_count': len(series['points']),
+                                        'tags': series.get('tags', [])
+                                    })
+                                    
+                                    response += f"   ✅ {metric_query} → ${latest_value:.2f}\n"
+                        except:
+                            # Metric doesn't exist or has no data
+                            pass
+                
+                response += "\n"
+            
+            # Also test specific service combinations
+            response += "**Service-Specific Search**:\n"
+            for service in service_prefixes[:10]:  # Limit to first 10 for performance
+                for pattern in search_patterns[:3]:  # Limit patterns
+                    metric_query = f"sum:{service}.{pattern}"
+                    if organization_filter:
+                        metric_query += f"{{organization:{organization_filter}}}"
+                    else:
+                        metric_query += "{*}"
+                    
+                    total_tested += 1
+                    
+                    try:
+                        metrics_data = await metrics_client.get_metrics(
+                            metric_name=metric_query,
+                            start_time=start_time,
+                            end_time=end_time
+                        )
+                        
+                        if metrics_data.get('series') and len(metrics_data['series']) > 0:
+                            series = metrics_data['series'][0]
+                            if series.get('points') and len(series['points']) > 0:
+                                latest_value = 0
+                                try:
+                                    point = series['points'][-1]
+                                    if hasattr(point, 'value'):
+                                        latest_value = point.value
+                                    elif isinstance(point, dict) and 'value' in point:
+                                        latest_value = point['value']
+                                    elif isinstance(point, list) and len(point) >= 2:
+                                        latest_value = point[1]
+                                    else:
+                                        import ast
+                                        parsed = ast.literal_eval(str(point))
+                                        if isinstance(parsed, list) and len(parsed) >= 2:
+                                            latest_value = parsed[1]
+                                except:
+                                    pass
+                                
+                                discovered_metrics.append({
+                                    'query': metric_query,
+                                    'metric': series['metric'],
+                                    'service': service,
+                                    'latest_value': latest_value,
+                                    'points_count': len(series['points']),
+                                    'tags': series.get('tags', [])
+                                })
+                                
+                                response += f"   ✅ {metric_query} → ${latest_value:.2f}\n"
+                    except:
+                        pass
+            
+            # Summary
+            response += f"\n📊 **DISCOVERY SUMMARY**:\n"
+            response += f"🔍 **Metrics Tested**: {total_tested}\n"
+            response += f"✅ **Metrics Found**: {len(discovered_metrics)}\n"
+            response += f"⏰ **Time Period**: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}\n\n"
+            
+            if discovered_metrics:
+                # Sort by latest value (highest first)
+                discovered_metrics.sort(key=lambda x: x['latest_value'], reverse=True)
+                
+                response += "💰 **Top Cost Metrics** (by latest value):\n"
+                total_discovered_cost = 0
+                
+                for i, metric in enumerate(discovered_metrics[:10], 1):  # Show top 10
+                    total_discovered_cost += metric['latest_value']
+                    response += f"{i:2d}. **{metric['service'].title()}**: ${metric['latest_value']:.2f}\n"
+                    response += f"     Query: {metric['query']}\n"
+                    response += f"     Metric: {metric['metric']}\n"
+                    if metric['tags']:
+                        response += f"     Tags: {', '.join(metric['tags'][:3])}\n"
+                    response += f"     Data Points: {metric['points_count']}\n\n"
+                
+                response += f"💰 **Total Discovered Cost**: ${total_discovered_cost:.2f}\n\n"
+                
+                response += "🎯 **Usage Tips**:\n"
+                response += "• Copy any of the above queries to use in datadog_cost_metrics_query\n"
+                response += "• Adjust organization_filter to focus on specific teams\n"
+                response += "• Use different time_range values for trend analysis\n"
+                response += "• Combine multiple metrics for comprehensive cost tracking\n"
+            else:
+                response += "📭 **No cost metrics found**.\n\n"
+                response += "💡 **Troubleshooting**:\n"
+                response += f"• Try different search patterns: 'billing', 'expense', 'spend'\n"
+                response += f"• Verify organization_filter: '{organization_filter}' has data\n"
+                response += f"• Extend time_range to capture historical data\n"
+                response += f"• Check if your DataDog account has cost/billing integrations\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Failed to discover DataDog cost metrics: {e}", provider="datadog")
+            return f"❌ Error discovering cost metrics: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_dashboard_get_template_variables(
+        dashboard_id: str
+    ) -> str:
+        """DataDog Dashboard Template Variables: List all available template variables and their options for any dashboard."""
+        logger.info(f"🎛️ Getting template variables for DataDog dashboard: {dashboard_id}...")
+        
+        try:
+            client = datadog_provider.get_client("dashboards")
+            
+            # Get dashboard
+            dashboard = await client.get_dashboard(dashboard_id)
+            
+            response = f"🎛️ **DATADOG DASHBOARD TEMPLATE VARIABLES**\n\n"
+            response += f"🎯 **Dashboard**: {dashboard['title']}\n"
+            response += f"📋 **ID**: {dashboard['id']}\n\n"
+            
+            if dashboard.get('template_variables'):
+                response += f"🎛️ **Template Variables**: {len(dashboard['template_variables'])} found\n\n"
+                
+                for i, var in enumerate(dashboard['template_variables'], 1):
+                    var_name = var.get('name', 'unnamed')
+                    var_default = var.get('default', '')
+                    var_available_values = var.get('available_values', [])
+                    var_prefix = var.get('prefix', '')
+                    
+                    response += f"**{i}. {var_name}**\n"
+                    response += f"   Default: {var_default or 'None'}\n"
+                    response += f"   Prefix: {var_prefix or 'None'}\n"
+                    
+                    if var_available_values:
+                        response += f"   Available Values ({len(var_available_values)}):\n"
+                        # Show first 10 values
+                        for value in var_available_values[:10]:
+                            response += f"     • {value}\n"
+                        if len(var_available_values) > 10:
+                            response += f"     ... and {len(var_available_values) - 10} more\n"
+                    else:
+                        response += f"   Available Values: None defined\n"
+                    
+                    response += "\n"
+                
+                # Show example usage
+                response += "💡 **Example Usage with datadog_cost_metrics_query**:\n"
+                example_filters = {}
+                for var in dashboard['template_variables']:
+                    var_name = var.get('name', '')
+                    var_available_values = var.get('available_values', [])
+                    if var_available_values:
+                        example_filters[var_name] = var_available_values[0]
+                    elif var.get('default'):
+                        example_filters[var_name] = var['default']
+                
+                if example_filters:
+                    import json
+                    response += f"```\n"
+                    response += f'template_variable_filters=\'{json.dumps(example_filters)}\'\n'
+                    response += f"```\n\n"
+                
+            else:
+                response += "📭 **No template variables found** in this dashboard.\n\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Failed to get DataDog dashboard template variables: {e}", "datadog")
+            return f"❌ Error getting template variables: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_tenant_cost_breakdown(
+        service_name: str,
+        organization_filter: Optional[str] = None,
+        time_range: str = "24h",
+        top_n: int = 10
+    ) -> str:
+        """DataDog Tenant Cost Breakdown: Get cost breakdown by tenant/organization for a specific service.
+        
+        Args:
+            service_name: Service name (e.g., 'carma', 'datawarehouse', 'analytics')
+            organization_filter: Optional filter for specific organization
+            time_range: Time range for the query (1h, 24h, 7d, 30d)
+            top_n: Number of top tenants to show
+        """
+        logger.info(f"💰 Getting tenant cost breakdown for {service_name}...")
+        
+        try:
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Parse time range
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            response = f"💰 **DATADOG TENANT COST BREAKDOWN**\n\n"
+            response += f"🎯 **Service**: {service_name.title()}\n"
+            response += f"⏰ **Time Range**: {time_range}\n"
+            if organization_filter:
+                response += f"🏢 **Organization Filter**: {organization_filter}\n"
+            response += f"📊 **Top**: {top_n} tenants\n\n"
+            
+            # Try different metric patterns to get tenant-level data
+            tenant_costs = {}
+            patterns_to_try = [
+                f"sum:{service_name}.organization.cost{{*}} by {{organization}}",
+                f"sum:{service_name}.cost{{*}} by {{organization}}",
+                f"avg:{service_name}.organization.cost{{*}} by {{organization}}",
+                f"max:{service_name}.organization.cost{{*}} by {{organization}}"
+            ]
+            
+            for pattern in patterns_to_try:
+                try:
+                    response += f"🔍 **Trying Pattern**: {pattern}\n"
+                    
+                    # Apply organization filter if provided
+                    if organization_filter:
+                        filtered_pattern = pattern.replace("{*}", f"{{organization:{organization_filter}}}")
+                    else:
+                        filtered_pattern = pattern
+                    
+                    metrics_data = await metrics_client.get_metrics(
+                        metric_name=filtered_pattern,
+                        start_time=start_time,
+                        end_time=end_time
+                    )
+                    
+                    if metrics_data.get('series') and len(metrics_data['series']) > 0:
+                        response += f"✅ **Found Data**: {len(metrics_data['series'])} series\n\n"
+                        
+                        for series in metrics_data['series']:
+                            # Extract organization/tenant from series metadata
+                            tenant_name = "unknown"
+                            if 'scope' in series:
+                                # Look for organization tag in scope
+                                scope_parts = series['scope'].split(',') if series['scope'] else []
+                                for part in scope_parts:
+                                    if 'organization:' in part:
+                                        tenant_name = part.split('organization:')[1].strip()
+                                        break
+                            
+                            # Get cost value
+                            if series.get('points') and len(series['points']) > 0:
+                                # Parse the last point
+                                try:
+                                    last_point = series['points'][-1]
+                                    if hasattr(last_point, 'value'):
+                                        cost_value = last_point.value
+                                    elif isinstance(last_point, list) and len(last_point) >= 2:
+                                        cost_value = last_point[1]
+                                    else:
+                                        # Try parsing as string
+                                        import ast
+                                        parsed_point = ast.literal_eval(str(last_point))
+                                        cost_value = parsed_point[1] if isinstance(parsed_point, list) else 0
+                                    
+                                    tenant_costs[tenant_name] = tenant_costs.get(tenant_name, 0) + float(cost_value)
+                                    
+                                except Exception as parse_error:
+                                    response += f"⚠️ **Parse Error**: {parse_error}\n"
+                        
+                        break  # Found working pattern, stop trying others
+                    else:
+                        response += f"📭 **No Data Found**\n"
+                        
+                except Exception as pattern_error:
+                    response += f"❌ **Pattern Failed**: {str(pattern_error)[:100]}...\n"
+            
+            # Display results
+            if tenant_costs:
+                response += f"💰 **TENANT COST BREAKDOWN**:\n\n"
+                sorted_tenants = sorted(tenant_costs.items(), key=lambda x: x[1], reverse=True)
+                total_cost = sum(tenant_costs.values())
+                
+                for i, (tenant, cost) in enumerate(sorted_tenants[:top_n], 1):
+                    percentage = (cost / total_cost * 100) if total_cost > 0 else 0
+                    response += f"**{i}. {tenant}**\n"
+                    response += f"   💰 Cost: ${cost:.2f} ({percentage:.1f}%)\n\n"
+                
+                response += f"📊 **Summary**:\n"
+                response += f"💰 **Total Cost**: ${total_cost:.2f}\n"
+                response += f"🏢 **Total Tenants**: {len(tenant_costs)}\n"
+                response += f"⏰ **Period**: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}\n"
+            else:
+                response += "📭 **No tenant cost data found**.\n\n"
+                response += "💡 **Suggestions**:\n"
+                response += "• Verify the service name is correct\n"
+                response += "• Check if tenant-level metrics exist for this service\n"
+                response += "• Try different time ranges\n"
+                response += "• Use datadog_discover_cost_metrics to find available metrics\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Failed to get tenant cost breakdown: {e}", "datadog")
+            return f"❌ Error getting tenant cost breakdown: {str(e)}"
+
+    @mcp.tool()
     async def datadog_test_connection() -> str:
         """DataDog Connection: Test connection and show account information."""
         logger.info("🧪 Testing DataDog connection...")
@@ -1675,25 +2108,30 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
 
     @mcp.tool()
     async def datadog_cost_metrics_query(
-        dashboard_id: str = "csc-fuy-ae8",
-        organization_filter: str = "b38uat",
+        dashboard_id: str,
+        template_variable_filters: Optional[str] = None,
         time_range: str = "24h"
     ) -> str:
-        """DataDog Cost Metrics: Query actual cost metrics from the Cost Auto Allocation dashboard with proper template variable substitution."""
-        logger.info(f"💰 Querying DataDog cost metrics for organization: {organization_filter}...")
+        """DataDog Cost Metrics: Query actual cost metrics from any dashboard with dynamic template variable discovery and substitution.
+        
+        Args:
+            dashboard_id: The DataDog dashboard ID to query
+            template_variable_filters: Optional JSON string of template variable filters like '{"organization": "myorg", "service": "web"}' (Claude will auto-convert dict to string)
+            time_range: Time range for the query (1h, 24h, 7d, 30d)
+        """
+        logger.info(f"💰 Querying DataDog cost metrics from dashboard: {dashboard_id}...")
         
         try:
             client = datadog_provider.get_client("dashboards")
             metrics_client = datadog_provider.get_client("metrics")
             
-            # Get dashboard to extract actual metric queries
+            # Get dashboard to extract template variables and discover structure
             dashboard = await client.get_dashboard(dashboard_id)
             
             response = f"💰 **DATADOG COST METRICS QUERY**\n\n"
             response += f"🎯 **Dashboard**: {dashboard['title']}\n"
             response += f"📋 **ID**: {dashboard['id']}\n"
-            response += f"⏰ **Time Range**: {time_range}\n"
-            response += f"🏢 **Organization**: {organization_filter}\n\n"
+            response += f"⏰ **Time Range**: {time_range}\n\n"
             
             # Parse time range
             end_time = datetime.now()
@@ -1708,92 +2146,264 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             else:
                 start_time = end_time - timedelta(hours=24)
             
-            # Since dashboard widgets are empty, use direct cost metrics approach
-            # Based on known cost metrics from Cost Auto Allocation dashboard
-            cost_metrics = [
-                "sum:datawarehouse.organization.cost{organization:" + organization_filter + "}",
-                "sum:carma.trigger.cost{organization:" + organization_filter + "}",
-                "sum:whatif.organization.cost{organization:" + organization_filter + "}",
-                "sum:analytics.organization.cost{organization:" + organization_filter + "}",
-                "sum:treasury.organization.cost{organization:" + organization_filter + "}"
-            ]
-            
+            # Generic approach: Discover cost metrics dynamically
             total_cost = 0
             service_costs = {}
             
-            response += "📊 **Cost Metrics Found:**\n\n"
-            response += f"🔍 **Debug**: Found {len(dashboard['widgets'])} widgets (all empty), using direct metrics approach\n\n"
-            response += f"🎯 **Known Cost Metrics**:\n"
+            response += "📊 **Cost Metrics Discovery:**\n\n"
+            response += f"🔍 **Dashboard Analysis**: Found {len(dashboard['widgets'])} widgets\n"
             
-            for i, metric_query in enumerate(cost_metrics, 1):
-                service_name = metric_query.split(':')[1].split('.')[0]
-                response += f"**{i}. {service_name.title()}**\n"
-                response += f"   Query: {metric_query}\n"
-                
+            # Step 1: Extract and process template variables from dashboard
+            template_vars = {}
+            available_filters = {}
+            
+            if dashboard.get('template_variables'):
+                response += f"🎯 **Template Variables**: {len(dashboard['template_variables'])} found\n"
+                for var in dashboard['template_variables']:
+                    var_name = var.get('name', '')
+                    var_default = var.get('default', '')
+                    var_available_values = var.get('available_values', [])
+                    
+                    template_vars[var_name] = var_default
+                    available_filters[var_name] = {
+                        'default': var_default,
+                        'available_values': var_available_values
+                    }
+                    
+                    response += f"   {var_name}: {var_default}"
+                    if var_available_values:
+                        response += f" (options: {', '.join(var_available_values[:5])}{'...' if len(var_available_values) > 5 else ''})"
+                    response += "\n"
+            
+            # Step 2: Parse user-provided template variable filters
+            user_filters = {}
+            if template_variable_filters:
                 try:
-                    # Query the actual metric
-                    response += f"   🔍 Querying DataDog...\n"
-                    metrics_data = await metrics_client.get_metrics(
-                        metric_name=metric_query,
-                        start_time=start_time,
-                        end_time=end_time
-                    )
-                    
-                    response += f"   📊 Got {len(metrics_data.get('series', []))} series\n"
-                    
-                    if metrics_data['series']:
-                        for series in metrics_data['series']:
-                            response += f"   📈 Series: {series['metric']} with {len(series['points'])} points\n"
-                            if series['points']:
-                                # Parse points correctly (they may be Point objects)
-                                values = []
-                                for point in series['points']:
-                                    if hasattr(point, 'value'):
-                                        values.append(point.value)
-                                    elif isinstance(point, dict) and 'value' in point:
-                                        values.append(point['value'])
-                                    elif isinstance(point, list) and len(point) >= 2:
-                                        values.append(point[1])  # [timestamp, value]
-                                    else:
-                                        # Try to parse as string representation
-                                        try:
-                                            point_str = str(point)
-                                            if '[' in point_str and ',' in point_str:
-                                                # Parse "[timestamp, value]" format
-                                                import ast
-                                                parsed = ast.literal_eval(point_str)
-                                                if isinstance(parsed, list) and len(parsed) >= 2:
-                                                    values.append(parsed[1])
-                                        except:
-                                            pass
-                                
-                                if values:
-                                    latest = values[-1] if values else 0
-                                    avg = sum(values) / len(values) if values else 0
-                                    
-                                    # Extract service name from metric
-                                    service = service_name
-                                    service_costs[service] = service_costs.get(service, 0) + latest
-                                    total_cost += latest
-                                    
-                                    response += f"   💰 Latest: ${latest:.2f}, Avg: ${avg:.2f}\n"
-                                    response += f"   📊 Data Points: {len(values)}\n"
-                                else:
-                                    response += f"   📭 Could not parse data points\n"
-                            else:
-                                response += f"   📭 No data points in series\n"
+                    # Claude auto-converts dict to JSON string, but sometimes passes dict directly
+                    # Handle both cases gracefully
+                    if isinstance(template_variable_filters, str):
+                        import json
+                        user_filters = json.loads(template_variable_filters)
+                    elif hasattr(template_variable_filters, 'items'):
+                        # Treat as dict-like object
+                        user_filters = dict(template_variable_filters)
                     else:
-                        response += f"   📭 No series data found\n"
-                        
-                except Exception as query_error:
-                    response += f"   ⚠️ Query failed: {str(query_error)[:100]}...\n"
+                        # Try to parse as string anyway
+                        import json
+                        user_filters = json.loads(str(template_variable_filters))
+                    
+                    if user_filters:
+                        response += f"\n🎛️ **User Filters Applied**: {len(user_filters)}\n"
+                        for key, value in user_filters.items():
+                            response += f"   {key}: {value}\n"
+                            # Override default template vars with user values
+                            if key in template_vars:
+                                template_vars[key] = value
+                except Exception as e:
+                    response += f"\n⚠️ **Error parsing template_variable_filters**: {str(e)}\n"
+                    response += f"⚠️ **Received**: {template_variable_filters} (type: {type(template_variable_filters)})\n"
+            
+            response += "\n"
+            
+            # Step 3: Discover cost-related metrics using DataDog Metrics API
+            response += "🔍 **Discovering Cost Metrics**:\n"
+            try:
+                # Search for metrics containing 'cost' keyword
+                cost_metrics_discovered = []
                 
-                response += "\n"
+                # Use DataDog metrics search API to find cost-related metrics
+                # This is a more generic approach than hardcoding specific metrics
+                search_patterns = ['cost', 'billing', 'expense', 'spend', 'price']
+                
+                for pattern in search_patterns:
+                    try:
+                        # Search for metrics with cost-related keywords
+                        response += f"   Searching for '{pattern}' metrics...\n"
+                        
+                        # Build metric queries with discovered template variables
+                        for base_pattern in [f"*.organization.{pattern}", f"*.{pattern}", f"{pattern}.*"]:
+                            for agg in ['sum', 'avg', 'max']:
+                                # Build base metric
+                                base_metric = f"{agg}:{base_pattern}"
+                                
+                                # Apply template variable filters
+                                tag_filters = []
+                                for var_name, var_value in template_vars.items():
+                                    if var_value and var_value != '*':
+                                        tag_filters.append(f"{var_name}:{var_value}")
+                                
+                                if tag_filters:
+                                    metric_with_filters = f"{base_metric}{{{','.join(tag_filters)}}}"
+                                else:
+                                    metric_with_filters = f"{base_metric}{{*}}"
+                                
+                                # Test if metric exists by attempting to query it
+                                try:
+                                    test_data = await metrics_client.get_metrics(
+                                        metric_name=metric_with_filters,
+                                        start_time=start_time,
+                                        end_time=end_time
+                                    )
+                                    
+                                    if test_data.get('series') and len(test_data['series']) > 0:
+                                        cost_metrics_discovered.append(metric_with_filters)
+                                        response += f"      ✅ Found: {metric_with_filters}\n"
+                                        
+                                except:
+                                    # Metric doesn't exist, continue searching
+                                    pass
+                        
+                    except Exception as search_error:
+                        response += f"      ⚠️ Search failed for '{pattern}': {str(search_error)[:50]}...\n"
+                
+                # Step 4: If no metrics discovered through search, fall back to common patterns
+                if not cost_metrics_discovered:
+                    response += "\n🔄 **Fallback**: Using common cost metric patterns...\n"
+                    
+                    # Common service prefixes that might have cost metrics
+                    common_services = [
+                        'datawarehouse', 'analytics', 'treasury', 'carma', 'whatif',
+                        'compute', 'storage', 'network', 'database', 'lambda', 
+                        'ec2', 'rds', 's3', 'cloudfront', 'elb', 'api_gateway',
+                        'application', 'service', 'infrastructure', 'platform'
+                    ]
+                    
+                    for service in common_services:
+                        for cost_field in ['cost', 'billing', 'spend', 'price']:
+                            # Try different metric structures
+                            patterns = [
+                                f"sum:{service}.organization.{cost_field}",
+                                f"sum:{service}.{cost_field}",
+                                f"sum:{cost_field}.{service}",
+                                f"avg:{service}.{cost_field}"
+                            ]
+                            
+                            for pattern in patterns:
+                                # Apply template variable filters discovered from dashboard
+                                tag_filters = []
+                                for var_name, var_value in template_vars.items():
+                                    if var_value and var_value != '*':
+                                        tag_filters.append(f"{var_name}:{var_value}")
+                                
+                                if tag_filters:
+                                    metric_query = f"{pattern}{{{','.join(tag_filters)}}}"
+                                else:
+                                    metric_query = f"{pattern}{{*}}"
+                                
+                                try:
+                                    # Test if this metric exists
+                                    test_data = await metrics_client.get_metrics(
+                                        metric_name=metric_query,
+                                        start_time=start_time,
+                                        end_time=end_time
+                                    )
+                                    
+                                    if test_data.get('series') and len(test_data['series']) > 0:
+                                        cost_metrics_discovered.append(metric_query)
+                                        response += f"   ✅ Discovered: {metric_query}\n"
+                                        break  # Found one for this service, move to next
+                                        
+                                except:
+                                    # This metric doesn't exist, try next pattern
+                                    continue
+                
+                response += f"\n📊 **Total Cost Metrics Found**: {len(cost_metrics_discovered)}\n\n"
+                
+                # Step 5: Query each discovered metric
+                if cost_metrics_discovered:
+                    response += "💰 **Querying Discovered Metrics**:\n\n"
+                    
+                    for i, metric_query in enumerate(cost_metrics_discovered, 1):
+                        # Extract service name from metric
+                        service_name = "unknown"
+                        try:
+                            # Try to extract service name from different metric patterns
+                            metric_parts = metric_query.split(':')[1].split('.') if ':' in metric_query else metric_query.split('.')
+                            if len(metric_parts) > 0:
+                                service_name = metric_parts[0].split('{')[0]  # Remove tag filters
+                        except:
+                            service_name = f"service_{i}"
+                        
+                        response += f"**{i}. {service_name.title()}**\n"
+                        response += f"   Query: {metric_query}\n"
+                        
+                        try:
+                            metrics_data = await metrics_client.get_metrics(
+                                metric_name=metric_query,
+                                start_time=start_time,
+                                end_time=end_time
+                            )
+                            
+                            response += f"   📊 Got {len(metrics_data.get('series', []))} series\n"
+                            
+                            if metrics_data['series']:
+                                for series in metrics_data['series']:
+                                    response += f"   📈 Series: {series['metric']} with {len(series['points'])} points\n"
+                                    if series['points']:
+                                        # Parse points correctly (they may be Point objects)
+                                        values = []
+                                        for point in series['points']:
+                                            if hasattr(point, 'value'):
+                                                values.append(point.value)
+                                            elif isinstance(point, dict) and 'value' in point:
+                                                values.append(point['value'])
+                                            elif isinstance(point, list) and len(point) >= 2:
+                                                values.append(point[1])  # [timestamp, value]
+                                            else:
+                                                # Try to parse as string representation
+                                                try:
+                                                    point_str = str(point)
+                                                    if '[' in point_str and ',' in point_str:
+                                                        # Parse "[timestamp, value]" format
+                                                        import ast
+                                                        parsed = ast.literal_eval(point_str)
+                                                        if isinstance(parsed, list) and len(parsed) >= 2:
+                                                            values.append(parsed[1])
+                                                except:
+                                                    pass
+                                        
+                                        if values:
+                                            latest = values[-1] if values else 0
+                                            avg = sum(values) / len(values) if values else 0
+                                            
+                                            service_costs[service_name] = service_costs.get(service_name, 0) + latest
+                                            total_cost += latest
+                                            
+                                            response += f"   💰 Latest: ${latest:.2f}, Avg: ${avg:.2f}\n"
+                                            response += f"   📊 Data Points: {len(values)}\n"
+                                        else:
+                                            response += f"   📭 Could not parse data points\n"
+                                    else:
+                                        response += f"   📭 No data points in series\n"
+                            else:
+                                response += f"   📭 No series data found\n"
+                                
+                        except Exception as query_error:
+                            response += f"   ⚠️ Query failed: {str(query_error)[:100]}...\n"
+                        
+                        response += "\n"
+                else:
+                    response += "📭 **No cost metrics discovered**. This dashboard may not contain cost data.\n\n"
+                    response += "💡 **Suggestions**:\n"
+                    response += "• Verify this dashboard contains cost/billing metrics\n" 
+                    response += "• Check template variable filters - try different values\n"
+                    response += "• Try a different time range\n"
+                    response += "• Use datadog_discover_cost_metrics to find available cost metrics\n"
+                    if available_filters:
+                        response += "\n🎛️ **Available Template Variables to Try**:\n"
+                        for var_name, var_info in available_filters.items():
+                            if var_info['available_values']:
+                                response += f"• {var_name}: {', '.join(var_info['available_values'][:5])}\n"
+                    response += "\n"
+                
+            except Exception as discovery_error:
+                response += f"❌ **Metric discovery failed**: {str(discovery_error)[:100]}...\n\n"
             
             # Summary
             response += f"📋 **COST SUMMARY**:\n"
             response += f"💰 **Total Cost**: ${total_cost:.2f}\n"
-            response += f"🏢 **Organization**: {organization_filter}\n"
+            if template_vars:
+                response += f"🎛️ **Filters Applied**: {', '.join([f'{k}:{v}' for k, v in template_vars.items() if v and v != '*'])}\n"
             response += f"⏰ **Time Period**: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}\n\n"
             
             if service_costs:
@@ -1810,3 +2420,950 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
         except Exception as e:
             logger.error(f"Failed to query DataDog cost metrics: {e}", "datadog")
             return f"❌ Error querying cost metrics: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_dashboard_analyze_widget(
+        dashboard_id: str,
+        widget_index: Optional[int] = None,
+        widget_title: Optional[str] = None,
+        template_variable_filters: Optional[str] = None,
+        time_range: str = "24h"
+    ) -> str:
+        """
+        DataDog Dashboard: Intelligently analyze any dashboard widget to determine its purpose and extract data.
+        
+        This tool examines widget structure, queries, and content to automatically determine:
+        - Widget type and visualization style
+        - Data purpose (cost analysis, performance metrics, top lists, etc.)
+        - Query patterns and metric types
+        - Extract and format relevant data based on what it finds
+        
+        Args:
+            dashboard_id: Dashboard ID to analyze
+            widget_index: Optional widget index (0-based) to analyze specific widget
+            widget_title: Optional widget title to find specific widget by name
+            template_variable_filters: Optional template variable values as JSON string (e.g., '{"organization": "myorg"}')
+            time_range: Time range for data extraction (1h, 24h, 7d, 30d)
+        """
+        logger.info(f"🔍 Intelligently analyzing dashboard {dashboard_id} widgets...")
+        
+        try:
+            client = datadog_provider.get_client("dashboards")
+            
+            # Get dashboard structure
+            dashboard = await client.get_dashboard(dashboard_id)
+            if not dashboard or 'widgets' not in dashboard:
+                return f"❌ Dashboard {dashboard_id} not found or has no widgets"
+            
+            # Parse template variable filters
+            template_vars = {}
+            if template_variable_filters:
+                try:
+                    if isinstance(template_variable_filters, str):
+                        template_vars = json.loads(template_variable_filters)
+                    elif isinstance(template_variable_filters, dict):
+                        template_vars = template_variable_filters
+                except json.JSONDecodeError:
+                    logger.warning("Invalid template variable filters JSON, ignoring")
+            
+            widgets = dashboard['widgets']
+            response = f"🔍 **INTELLIGENT DASHBOARD WIDGET ANALYSIS**\n\n"
+            response += f"📊 **Dashboard**: {dashboard.get('title', 'Unknown')} (ID: {dashboard_id})\n"
+            response += f"📈 **Total Widgets**: {len(widgets)}\n"
+            response += f"⏰ **Time Range**: {time_range}\n"
+            if template_vars:
+                response += f"🎯 **Filters**: {template_vars}\n"
+            response += "\n"
+            
+            # If specific widget requested, analyze only that one
+            target_widgets = []
+            if widget_index is not None:
+                if 0 <= widget_index < len(widgets):
+                    target_widgets = [widgets[widget_index]]
+                    response += f"🎯 **Analyzing Widget #{widget_index}**\n\n"
+                else:
+                    return f"❌ Widget index {widget_index} out of range (0-{len(widgets)-1})"
+            elif widget_title:
+                # Find widget by title
+                for i, widget in enumerate(widgets):
+                    widget_def = widget.get('definition', {})
+                    title = widget_def.get('title', '').lower()
+                    if widget_title.lower() in title:
+                        target_widgets.append(widget)
+                        response += f"🎯 **Found Widget**: '{widget_def.get('title', 'Untitled')}' (Index: {i})\n\n"
+                        break
+                if not target_widgets:
+                    return f"❌ No widget found with title containing '{widget_title}'"
+            else:
+                # Analyze all widgets
+                target_widgets = widgets
+                response += "🔍 **Analyzing All Widgets**\n\n"
+            
+            # Analyze each widget
+            for widget_idx, widget in enumerate(target_widgets):
+                if len(target_widgets) > 1:
+                    actual_idx = widgets.index(widget) if widget in widgets else widget_idx
+                    response += f"## Widget {actual_idx}: "
+                
+                # Get widget details
+                widget_def = widget.get('definition', {})
+                widget_type = str(widget_def.get('type', 'unknown'))
+                title = widget_def.get('title', 'Untitled Widget')
+                
+                analysis = f"**{title}**\n"
+                analysis += f"📊 **Type**: {widget_type.replace('_', ' ').title()}\n"
+                
+                # Determine widget purpose based on title
+                purpose_keywords = {
+                    'cost': ['cost', 'billing', 'spend', 'expense', 'price', 'budget'],
+                    'performance': ['latency', 'response time', 'throughput', 'cpu', 'memory', 'performance'],
+                    'top_list': ['top', 'highest', 'most', 'largest', 'biggest', 'ranking'],
+                    'error_tracking': ['error', 'exception', 'failure', 'alert', 'issue'],
+                    'usage': ['usage', 'utilization', 'consumption', 'volume', 'count'],
+                    'trend': ['trend', 'over time', 'historical', 'timeline', 'growth']
+                }
+                
+                detected_purposes = []
+                title_lower = title.lower()
+                
+                for purpose, keywords in purpose_keywords.items():
+                    if any(keyword in title_lower for keyword in keywords):
+                        detected_purposes.append(purpose)
+                
+                if detected_purposes:
+                    analysis += f"🎯 **Detected Purpose**: {', '.join(detected_purposes)}\n"
+                
+                # Analyze widget structure and queries
+                if widget_type == 'group':
+                    nested_widgets = widget_def.get('widgets', [])
+                    analysis += f"📦 **Group Widget** with {len(nested_widgets)} nested widgets\n"
+                    
+                    # If nested widgets are empty (common with DataDog API), try intelligent reconstruction
+                    if len(nested_widgets) == 0:
+                        analysis += f"   🧠 **Empty widget detected - using intelligent query reconstruction**\n"
+                        
+                        # Extract service name from widget title
+                        service_name = None
+                        title_words = title.lower().split()
+                        # Common words to exclude when extracting service names
+                        exclude_words = ['cost', 'costs', 'top', 'breakdown', 'by', 'service', 'tenant', 'organization', 
+                                       'widget', 'dashboard', 'summary', 'total', 'overview', 'analysis', 'per', 'hours',
+                                       'runtime', 'average', 'duration', 'number', 'historic', 'queue', 'trigger']
+                        
+                        for word in title_words:
+                            if word not in exclude_words and len(word) > 2:  # Ignore very short words
+                                service_name = word
+                                break
+                        
+                        if service_name:
+                            analysis += f"   🎯 **Detected Service**: {service_name}\n"
+                            
+                            # Intelligently build metric patterns based on widget title context
+                            metric_patterns = []
+                            title_lower = title.lower()
+                            
+                            # Extract breakdown dimension from title
+                            breakdown_by = "organization"  # Default
+                            if "trigger" in title_lower:
+                                breakdown_by = "trigger"
+                            elif "queue" in title_lower:
+                                breakdown_by = "queue"
+                            elif "tenant" in title_lower:
+                                breakdown_by = "organization"
+                            elif "host" in title_lower:
+                                breakdown_by = "host"
+                            elif "service" in title_lower:
+                                breakdown_by = "service"
+                            elif "endpoint" in title_lower:
+                                breakdown_by = "endpoint"
+                                
+                            analysis += f"   📊 **Breakdown Dimension**: {breakdown_by}\n"
+                            
+                            # Build patterns based on title keywords using KNOWN WORKING PATTERNS
+                            if "cost" in title_lower or not detected_purposes:  # Default to cost
+                                if breakdown_by == "trigger":
+                                    metric_patterns.extend([
+                                        f"sum:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                                        f"avg:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                                        f"sum:{service_name}.cost{{*}} by {{trigger}}"
+                                    ])
+                                elif breakdown_by == "queue":
+                                    metric_patterns.extend([
+                                        f"sum:{service_name}.queue.cost{{*}} by {{queue}}",
+                                        f"avg:{service_name}.queue.cost{{*}} by {{queue}}",
+                                        f"sum:{service_name}.cost{{*}} by {{queue}}"
+                                    ])
+                                else:  # organization/tenant
+                                    metric_patterns.extend([
+                                        f"sum:{service_name}.trigger.cost{{*}} by {{organization}}",
+                                        f"sum:{service_name}.organization.cost{{*}} by {{organization}}",
+                                        f"sum:{service_name}.cost{{*}} by {{organization}}"
+                                    ])
+                            elif "runtime" in title_lower or "hours" in title_lower:
+                                metric_patterns.extend([
+                                    f"sum:{service_name}.runtime.hours{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.runtime{{*}} by {{{breakdown_by}}}",
+                                    f"sum:{service_name}.hours{{*}} by {{{breakdown_by}}}"
+                                ])
+                            elif "duration" in title_lower:
+                                metric_patterns.extend([
+                                    f"avg:{service_name}.duration{{*}} by {{{breakdown_by}}}",
+                                    f"avg:{service_name}.trigger.duration{{*}} by {{{breakdown_by}}}",
+                                    f"max:{service_name}.duration{{*}} by {{{breakdown_by}}}"
+                                ])
+                            elif "number" in title_lower:
+                                metric_patterns.extend([
+                                    f"count:{service_name}.*{{*}} by {{{breakdown_by}}}",
+                                    f"sum:{service_name}.count{{*}} by {{{breakdown_by}}}"
+                                ])
+                            else:
+                                # Try the known working patterns as fallback
+                                metric_patterns.extend([
+                                    f"sum:{service_name}.trigger.cost{{*}} by {{organization}}",
+                                    f"sum:{service_name}.organization.cost{{*}} by {{organization}}"
+                                ])
+                            
+                            # Try each pattern to find working metrics
+                            for pattern in metric_patterns:
+                                try:
+                                    analysis += f"      🔍 **Testing Pattern**: {pattern}\n"
+                                    
+                                    metrics_client = datadog_provider.get_client("metrics")
+                                    end_time = datetime.now()
+                                    start_time = end_time - timedelta(hours=24)
+                                    
+                                    result = await metrics_client.query_metrics(
+                                        query=pattern,
+                                        start_time=int(start_time.timestamp()),
+                                        end_time=int(end_time.timestamp())
+                                    )
+                                    
+                                    if result and 'series' in result and result['series']:
+                                        series_count = len(result['series'])
+                                        analysis += f"      ✅ **Found {series_count} tenant series!**\n"
+                                        
+                                        # Extract tenant costs using the same logic that worked in our test
+                                        tenant_costs = []
+                                        for series in result['series']:
+                                            scope = series.get('scope', '')
+                                            points = series.get('points', [])
+                                            
+                                            if points:
+                                                latest_point = points[-1]
+                                                value = None
+                                                
+                                                # Handle different point formats
+                                                if isinstance(latest_point, dict):
+                                                    value = latest_point.get('value')
+                                                elif isinstance(latest_point, list) and len(latest_point) >= 2:
+                                                    value = latest_point[1]
+                                                
+                                                if value is not None and scope:
+                                                    tenant_costs.append((scope, value))
+                                        
+                                        analysis += f"      📋 **Debug**: Extracted {len(tenant_costs)} tenant costs from {len(result['series'])} series\n"
+                                        
+                                        if tenant_costs:
+                                            # Sort by value and show top entries
+                                            tenant_costs.sort(key=lambda x: x[1], reverse=True)
+                                            
+                                            # Determine data type and units for display
+                                            data_type = "Value"
+                                            currency_symbol = ""
+                                            unit = ""
+                                            
+                                            if 'cost' in pattern.lower():
+                                                data_type = "Cost"
+                                                currency_symbol = "$"
+                                            elif 'runtime' in pattern.lower() or 'hours' in pattern.lower():
+                                                data_type = "Runtime Hours"
+                                                unit = "h"
+                                            elif 'duration' in pattern.lower():
+                                                data_type = "Duration"
+                                                unit = "s"
+                                            elif 'count' in pattern.lower():
+                                                data_type = "Count"
+                                                unit = ""
+                                            
+                                            # Create breakdown title based on detected dimension
+                                            breakdown_title = f"Top {service_name.title()} by {breakdown_by.title()}"
+                                            analysis += f"      📊 **{breakdown_title}**:\n"
+                                            
+                                            for idx, (item, value) in enumerate(tenant_costs[:10]):
+                                                # Clean up item name based on breakdown dimension
+                                                display_name = item
+                                                for prefix in [f'{breakdown_by}:', 'organization:', 'service:', 'host:', 'endpoint:', 'container:', 'trigger:', 'queue:']:
+                                                    if prefix in item:
+                                                        display_name = item.replace(prefix, '').strip()
+                                                        break
+                                                
+                                                analysis += f"         {idx+1}. {display_name}: {currency_symbol}{value:.2f}{unit}\n"
+                                            
+                                            total_value = sum(value for _, value in tenant_costs)
+                                            analysis += f"      📊 **Total {data_type}**: {currency_symbol}{total_value:.2f}{unit}\n"
+                                            analysis += f"      🎯 **Successfully found {breakdown_by} breakdown data!**\n"
+                                            break
+                                        else:
+                                            analysis += f"      ❌ **No cost data extracted from series**\n"
+                                    else:
+                                        analysis += f"      ❌ **No data found**\n"
+                                except Exception as e:
+                                    analysis += f"      ❌ **Error**: {str(e)[:50]}...\n"
+                        else:
+                            analysis += f"   ❌ **Could not determine service name from title**\n"
+                    else:
+                        # Analyze each nested widget (if available)
+                        for i, nested_widget in enumerate(nested_widgets):
+                            nested_def = nested_widget.get('definition', {})
+                            nested_title = nested_def.get('title', f'Nested Widget {i+1}')
+                            nested_type = str(nested_def.get('type', 'unknown'))
+                            
+                            analysis += f"   └── **{nested_title}** ({nested_type})\n"
+                            
+                            # Check for queries in nested widget
+                            nested_requests = nested_def.get('requests', [])
+                            if nested_requests:
+                                for j, request in enumerate(nested_requests):
+                                    query_text = ""
+                                    if 'q' in request:
+                                        query_text = request['q']
+                                    elif 'queries' in request and request['queries']:
+                                        query_text = request['queries'][0].get('query', '')
+                                    
+                                    if query_text:
+                                        # Apply template variable substitution
+                                        processed_query = query_text
+                                        for var_name, var_value in template_vars.items():
+                                            processed_query = processed_query.replace(f"${{{var_name}}}", var_value)
+                                            processed_query = processed_query.replace(f"${var_name}", var_value)
+                                        
+                                        analysis += f"       📋 **Query {j+1}**: {processed_query}\n"
+                                        
+                                        # Try to extract and query the metric
+                                        if 'cost' in detected_purposes and ':' in processed_query:
+                                            try:
+                                                # Attempt to query this metric for cost data
+                                                metrics_client = datadog_provider.get_client("metrics")
+                                                
+                                                # Set time range
+                                                end_time = datetime.now()
+                                                start_time = end_time - timedelta(hours=24)
+                                                
+                                                result = await metrics_client.query_metrics(
+                                                    query=processed_query,
+                                                    start_time=int(start_time.timestamp()),
+                                                    end_time=int(end_time.timestamp())
+                                                )
+                                                
+                                                if result and 'series' in result and result['series']:
+                                                    series = result['series'][0]
+                                                    points = series.get('points', [])
+                                                    
+                                                    if points:
+                                                        # Get latest value
+                                                        latest_point = points[-1]
+                                                        if isinstance(latest_point, list) and len(latest_point) >= 2:
+                                                            value = latest_point[1]
+                                                            analysis += f"       💰 **Latest Value**: ${value:.2f}\n"
+                                            except Exception as e:
+                                                analysis += f"       ❌ **Query Error**: {str(e)[:50]}...\n"
+                else:
+                    # Regular widget - analyze requests/queries
+                    requests = widget_def.get('requests', [])
+                    if requests:
+                        analysis += f"📋 **Queries Found**: {len(requests)}\n"
+                        
+                        for i, request in enumerate(requests):
+                            query_text = ""
+                            if 'q' in request:
+                                query_text = request['q']
+                            elif 'queries' in request and request['queries']:
+                                query_text = request['queries'][0].get('query', '')
+                            
+                            if query_text:
+                                # Apply template variable substitution
+                                processed_query = query_text
+                                for var_name, var_value in template_vars.items():
+                                    processed_query = processed_query.replace(f"${{{var_name}}}", var_value)
+                                    processed_query = processed_query.replace(f"${var_name}", var_value)
+                                
+                                analysis += f"   {i+1}. **Query**: {processed_query}\n"
+                                
+                                # Try to extract and query the metric if it's cost-related
+                                if 'cost' in detected_purposes and ':' in processed_query:
+                                    try:
+                                        metrics_client = datadog_provider.get_client("metrics")
+                                        
+                                        # Set time range
+                                        end_time = datetime.now()
+                                        start_time = end_time - timedelta(hours=24)
+                                        
+                                        result = await metrics_client.query_metrics(
+                                            query=processed_query,
+                                            start_time=int(start_time.timestamp()),
+                                            end_time=int(end_time.timestamp())
+                                        )
+                                        
+                                        if result and 'series' in result and result['series']:
+                                            series = result['series'][0]
+                                            points = series.get('points', [])
+                                            
+                                            if points:
+                                                # Get latest value
+                                                latest_point = points[-1]
+                                                if isinstance(latest_point, list) and len(latest_point) >= 2:
+                                                    value = latest_point[1]
+                                                    analysis += f"      💰 **Latest Value**: ${value:.2f}\n"
+                                    except Exception as e:
+                                        analysis += f"      ❌ **Query Error**: {str(e)[:50]}...\n"
+                    else:
+                        analysis += "📋 **No queries found in widget**\n"
+                
+                response += analysis + "\n\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"DataDog dashboard widget analysis failed: {e}", provider="datadog")
+            return f"❌ Error analyzing dashboard widgets: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_dashboard_generic_analyzer(
+        dashboard_id: str,
+        widget_identifier: Optional[str] = None,
+        time_range: str = "24h",
+        debug_mode: bool = False
+    ) -> str:
+        """DataDog Generic Dashboard Analyzer: Step-by-step analysis of any dashboard to extract data.
+        
+        Args:
+            dashboard_id: The DataDog dashboard ID
+            widget_identifier: Optional widget title or index to analyze specific widget
+            time_range: Time range for metrics (1h, 24h, 7d, 30d)
+            debug_mode: Show detailed debug information
+        """
+        logger.info(f"🔍 Generic dashboard analysis for {dashboard_id}...")
+        
+        try:
+            output = f"🔍 **GENERIC DASHBOARD ANALYZER**\n\n"
+            output += f"📊 **Dashboard ID**: {dashboard_id}\n"
+            output += f"⏰ **Time Range**: {time_range}\n"
+            output += f"🐛 **Debug Mode**: {debug_mode}\n\n"
+            
+            # Step 1: Get dashboard structure
+            output += "**Step 1: Getting Dashboard Structure**\n"
+            client = datadog_provider.get_client("dashboards")
+            
+            try:
+                dashboard = await client.get_dashboard(dashboard_id)
+                output += f"✅ Dashboard found: {dashboard.get('title', 'Untitled')}\n"
+                output += f"   Total widgets: {len(dashboard.get('widgets', []))}\n\n"
+            except Exception as e:
+                return f"❌ Failed to get dashboard: {str(e)}"
+            
+            # Step 2: Extract template variables
+            output += "**Step 2: Extracting Template Variables**\n"
+            template_vars = dashboard.get('template_variables', [])
+            template_var_map = {}
+            
+            if template_vars:
+                output += f"✅ Found {len(template_vars)} template variables:\n"
+                for var in template_vars:
+                    if isinstance(var, dict):
+                        name = var.get('name', 'unknown')
+                        prefix = var.get('prefix', name)
+                        default = var.get('default', '*')
+                        available = var.get('available_values', [])
+                        
+                        template_var_map[name] = {
+                            'prefix': prefix,
+                            'default': default,
+                            'available': available
+                        }
+                        
+                        output += f"   - {name}: prefix='{prefix}', default='{default}'\n"
+                        if available and debug_mode:
+                            output += f"     Available values: {available[:5]}\n"
+            else:
+                output += "📭 No template variables found\n"
+            output += "\n"
+            
+            # Step 3: Find target widget(s)
+            output += "**Step 3: Finding Target Widget(s)**\n"
+            widgets = dashboard.get('widgets', [])
+            target_widgets = []
+            
+            if widget_identifier:
+                # Try to find by title or index
+                if widget_identifier.isdigit():
+                    idx = int(widget_identifier)
+                    if 0 <= idx < len(widgets):
+                        target_widgets = [widgets[idx]]
+                        output += f"✅ Found widget at index {idx}\n"
+                else:
+                    # Search by title
+                    for i, widget in enumerate(widgets):
+                        widget_def = widget.get('definition', {})
+                        title = widget_def.get('title', '')
+                        if widget_identifier.lower() in title.lower():
+                            target_widgets.append(widget)
+                            output += f"✅ Found widget '{title}' at index {i}\n"
+                
+                if not target_widgets:
+                    output += f"❌ No widget found matching '{widget_identifier}'\n"
+                    output += f"Available widgets:\n"
+                    for i, widget in enumerate(widgets):
+                        widget_def = widget.get('definition', {})
+                        title = widget_def.get('title', f'Widget {i}')
+                        output += f"   {i}: {title}\n"
+                    return output
+            else:
+                target_widgets = widgets
+                output += f"✅ Analyzing all {len(widgets)} widgets\n"
+            output += "\n"
+            
+            # Step 4: Analyze each widget
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Parse time range
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            for widget_idx, widget in enumerate(target_widgets):
+                widget_def = widget.get('definition', {})
+                widget_type = str(widget_def.get('type', 'unknown'))
+                widget_title = widget_def.get('title', f'Widget {widget_idx}')
+                
+                output += f"**Widget: {widget_title}**\n"
+                output += f"📊 Type: {widget_type}\n"
+                
+                if debug_mode:
+                    output += f"   Definition keys: {list(widget_def.keys())}\n"
+                
+                # Handle different widget types
+                if widget_type == 'group':
+                    output += "📦 This is a group widget\n"
+                    
+                    # Check for nested widgets
+                    nested_widgets = widget_def.get('widgets', [])
+                    if nested_widgets:
+                        output += f"   Contains {len(nested_widgets)} nested widgets\n"
+                        # TODO: Recursively process nested widgets
+                    else:
+                        output += "   ⚠️ No nested widgets found (empty group)\n"
+                        
+                        # For empty groups, try to infer queries from widget title
+                        output += "   🧠 Attempting intelligent query reconstruction...\n"
+                        
+                        # Extract service name from title
+                        title_words = widget_title.lower().split()
+                        service_name = None
+                        for word in title_words:
+                            if word not in ['cost', 'total', 'by', 'per', 'widget', 'summary']:
+                                service_name = word
+                                break
+                        
+                        if service_name:
+                            output += f"   Detected service: {service_name}\n"
+                            
+                            # Try the known working pattern
+                            test_query = f"sum:{service_name}.trigger.cost{{*}} by {{organization}}"
+                            output += f"   Testing query: {test_query}\n"
+                            
+                            try:
+                                result = await metrics_client.query_metrics(
+                                    query=test_query,
+                                    start_time=int(start_time.timestamp()),
+                                    end_time=int(end_time.timestamp())
+                                )
+                                
+                                if result and 'series' in result and result['series']:
+                                    output += f"   ✅ Found {len(result['series'])} series!\n"
+                                    
+                                    # Show top 5 results
+                                    data_points = []
+                                    for series in result['series']:
+                                        scope = series.get('scope', '')
+                                        points = series.get('points', [])
+                                        if points:
+                                            latest_point = points[-1]
+                                            value = latest_point[1] if isinstance(latest_point, list) and len(latest_point) >= 2 else 0
+                                            data_points.append((scope, value))
+                                    
+                                    if data_points:
+                                        data_points.sort(key=lambda x: x[1], reverse=True)
+                                        output += "   Top 5 results:\n"
+                                        for i, (scope, value) in enumerate(data_points[:5]):
+                                            display_name = scope.replace('organization:', '') if 'organization:' in scope else scope
+                                            output += f"      {i+1}. {display_name}: ${value:.2f}\n"
+                                else:
+                                    output += "   ❌ No data found\n"
+                            except Exception as query_error:
+                                output += f"   ❌ Query failed: {str(query_error)[:100]}\n"
+                    
+                else:
+                    # Non-group widget - check for requests
+                    requests = widget_def.get('requests', [])
+                    if requests:
+                        output += f"📊 Found {len(requests)} requests\n"
+                        
+                        for req_idx, request in enumerate(requests):
+                            if isinstance(request, dict):
+                                # Look for queries in various formats
+                                query = None
+                                if 'q' in request:
+                                    query = request['q']
+                                elif 'queries' in request and request['queries']:
+                                    query = request['queries'][0].get('query', '')
+                                
+                                if query:
+                                    output += f"   Request {req_idx + 1}: {query[:100]}...\n"
+                                    
+                                    # Apply template variable substitution
+                                    processed_query = query
+                                    for var_name, var_info in template_var_map.items():
+                                        placeholder = f"${{{var_name}}}"
+                                        if placeholder in processed_query:
+                                            processed_query = processed_query.replace(placeholder, var_info['default'])
+                                            output += f"      Substituted {placeholder} → {var_info['default']}\n"
+                                    
+                                    if debug_mode:
+                                        output += f"      Processed: {processed_query[:100]}...\n"
+                    else:
+                        output += "📭 No requests found in widget\n"
+                
+                output += "\n"
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Generic dashboard analyzer failed: {e}", "datadog")
+            import traceback
+            if debug_mode:
+                return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+            else:
+                return f"❌ Error analyzing dashboard: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_dashboard_deep_debug(
+        dashboard_id: str,
+        widget_index: Optional[int] = None
+    ) -> str:
+        """DataDog Deep Debug: Comprehensive exploration of dashboard structure to find hidden nested widgets.
+        
+        Args:
+            dashboard_id: The DataDog dashboard ID
+            widget_index: Optional specific widget index to deep dive into
+        """
+        logger.info(f"🔍 Deep debugging dashboard structure for {dashboard_id}...")
+        
+        try:
+            output = f"🔍 **DATADOG DEEP DASHBOARD DEBUG**\n\n"
+            output += f"📊 **Dashboard ID**: {dashboard_id}\n\n"
+            
+            client = datadog_provider.get_client("dashboards")
+            
+            # Get raw dashboard data
+            dashboard = await client.get_dashboard(dashboard_id)
+            
+            output += f"✅ **Dashboard**: {dashboard.get('title', 'Untitled')}\n"
+            output += f"📈 **Total Widgets**: {len(dashboard.get('widgets', []))}\n\n"
+            
+            # Show ALL top-level keys in dashboard
+            output += "🔍 **Dashboard Structure**:\n"
+            for key, value in dashboard.items():
+                if isinstance(value, list):
+                    output += f"   {key}: list[{len(value)}]\n"
+                elif isinstance(value, dict):
+                    output += f"   {key}: dict with {len(value)} keys = {list(value.keys())[:5]}\n"
+                else:
+                    output += f"   {key}: {type(value).__name__} = {str(value)[:50]}...\n"
+            output += "\n"
+            
+            widgets = dashboard.get('widgets', [])
+            
+            # If specific widget requested, focus on that
+            if widget_index is not None:
+                if 0 <= widget_index < len(widgets):
+                    widgets = [widgets[widget_index]]
+                    output += f"🎯 **Focusing on Widget {widget_index}**\n\n"
+                else:
+                    return f"❌ Widget index {widget_index} out of range (0-{len(widgets)-1})"
+            
+            for i, widget in enumerate(widgets):
+                if widget_index is None:
+                    output += f"## **Widget {i}**\n"
+                
+                # Show ALL widget structure
+                output += f"📊 **Raw Widget Keys**: {list(widget.keys())}\n"
+                
+                widget_def = widget.get('definition', {})
+                widget_type = widget_def.get('type', 'unknown')
+                widget_title = widget_def.get('title', f'Widget {i}')
+                
+                output += f"   Title: {widget_title}\n"
+                output += f"   Type: {widget_type}\n"
+                
+                # Show ALL definition keys and their content
+                output += f"   Definition keys: {list(widget_def.keys())}\n"
+                
+                for key, value in widget_def.items():
+                    if key in ['type', 'title']:
+                        continue
+                        
+                    output += f"   📋 **{key}**:\n"
+                    
+                    if isinstance(value, list):
+                        output += f"      List with {len(value)} items:\n"
+                        for j, item in enumerate(value[:3]):  # Show first 3 items
+                            if isinstance(item, dict):
+                                output += f"         {j}: dict with keys = {list(item.keys())}\n"
+                                # If it looks like a widget, show more details
+                                if 'definition' in item or 'type' in item:
+                                    item_def = item.get('definition', item)
+                                    item_type = item_def.get('type', 'unknown')
+                                    item_title = item_def.get('title', f'Item {j}')
+                                    output += f"            → {item_title} ({item_type})\n"
+                                    
+                                    # Check for requests in nested items
+                                    requests = item_def.get('requests', [])
+                                    if requests:
+                                        output += f"            → Has {len(requests)} requests\n"
+                                        for k, req in enumerate(requests[:2]):
+                                            if isinstance(req, dict):
+                                                query = req.get('q', req.get('query', ''))
+                                                if query:
+                                                    output += f"               Query {k}: {query[:80]}...\n"
+                            else:
+                                output += f"         {j}: {type(item).__name__} = {str(item)[:50]}...\n"
+                                
+                        if len(value) > 3:
+                            output += f"         ... and {len(value) - 3} more items\n"
+                            
+                    elif isinstance(value, dict):
+                        output += f"      Dict with {len(value)} keys:\n"
+                        for sub_key, sub_value in list(value.items())[:5]:
+                            if isinstance(sub_value, list):
+                                output += f"         {sub_key}: list[{len(sub_value)}]\n"
+                            elif isinstance(sub_value, dict):
+                                output += f"         {sub_key}: dict[{len(sub_value)}]\n"
+                            else:
+                                output += f"         {sub_key}: {str(sub_value)[:30]}...\n"
+                    else:
+                        output += f"      {type(value).__name__}: {str(value)[:100]}...\n"
+                
+                # Special handling for group widgets
+                if str(widget_type) == 'group':
+                    output += f"\n🔍 **GROUP WIDGET DEEP DIVE**:\n"
+                    
+                    # Check all possible keys that might contain nested widgets
+                    nested_keys = ['widgets', 'nested_widgets', 'children', 'layout', 'grid', 'items']
+                    
+                    for key in nested_keys:
+                        if key in widget_def:
+                            nested_value = widget_def[key]
+                            output += f"   Found '{key}': {type(nested_value)} with {len(nested_value) if isinstance(nested_value, list) else 'N/A'} items\n"
+                            
+                            if isinstance(nested_value, list) and nested_value:
+                                output += f"      First item keys: {list(nested_value[0].keys()) if isinstance(nested_value[0], dict) else type(nested_value[0])}\n"
+                    
+                    # Also check for layout or positioning information
+                    layout_keys = ['layout', 'size', 'position', 'x', 'y', 'width', 'height']
+                    layout_info = {}
+                    for key in layout_keys:
+                        if key in widget_def:
+                            layout_info[key] = widget_def[key]
+                    
+                    if layout_info:
+                        output += f"   Layout info: {layout_info}\n"
+                
+                output += "\n"
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Deep dashboard debug failed: {e}", "datadog")
+            import traceback
+            return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+
+    @mcp.tool()
+    async def datadog_trigger_cost_analysis(
+        service: str = "carma",
+        time_range: str = "24h",
+        organization: Optional[str] = None
+    ) -> str:
+        """DataDog Trigger Cost Analysis: Direct query for individual trigger cost breakdown for any service.
+        
+        Args:
+            service: Service name (e.g., carma, lambda, etc.)
+            time_range: Time range (1h, 24h, 7d, 30d)
+            organization: Optional organization filter
+        """
+        logger.info(f"🔍 Querying {service} trigger costs for {organization or 'all'} over {time_range}...")
+        
+        try:
+            output = f"💰 **{service.upper()} TRIGGER COST BREAKDOWN**\n\n"
+            output += f"🏢 **Organization**: {organization or 'all'}\n"
+            output += f"⏰ **Time Range**: {time_range}\n\n"
+            
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Convert time range to hours
+            time_hours = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}.get(time_range, 24)
+            
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(hours=time_hours)
+            
+            # Build organization filter
+            org_filter = f"organization:{organization}" if organization else "*"
+            
+            # Test multiple query patterns to find trigger-level data
+            trigger_queries = [
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{trigger}}",
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{trigger_name}}",
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{function}}",
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{name}}",
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{service}}",
+                f"sum:{service}.trigger.cost{{{org_filter}}} by {{queue}}",
+                f"avg:{service}.trigger.cost{{{org_filter}}} by {{trigger}}",
+                f"max:{service}.trigger.cost{{{org_filter}}} by {{trigger}}",
+                # Try different metric patterns
+                f"sum:{service}.cost{{{org_filter}}} by {{trigger}}",
+                f"sum:{service}.queue.cost{{{org_filter}}} by {{trigger}}",
+                f"sum:trigger.cost{{{org_filter}}} by {{trigger}}",
+                # Try broader patterns
+                f"sum:{service}.*.cost{{{org_filter}}} by {{trigger}}",
+                f"sum:*.{service}.cost{{{org_filter}}} by {{trigger}}",
+            ]
+            
+            found_data = False
+            
+            for query in trigger_queries:
+                try:
+                    output += f"🔍 **Testing**: `{query}`\n"
+                    
+                    result = await metrics_client.query_metrics(
+                        query=query,
+                        start_time=int(start_time.timestamp()),
+                        end_time=int(end_time.timestamp())
+                    )
+                    
+                    if result and 'series' in result and result['series']:
+                        series_count = len(result['series'])
+                        output += f"   ✅ **Found {series_count} trigger series!**\n\n"
+                        
+                        # Extract trigger costs
+                        trigger_costs = []
+                        
+                        for series in result['series']:
+                            scope = series.get('scope', '')
+                            points = series.get('points', [])
+                            
+                            if points:
+                                # Get the trigger name from scope
+                                trigger_name = "unknown"
+                                if scope:
+                                    # Extract trigger name from scope like "trigger:trigger_name"
+                                    for part in scope.split(','):
+                                        if ':' in part:
+                                            key, value = part.split(':', 1)
+                                            if key.strip() in ['trigger', 'trigger_name', 'function', 'name']:
+                                                trigger_name = value.strip()
+                                                break
+                                
+                                # Calculate total cost from points
+                                total_cost = 0
+                                valid_points = 0
+                                for point in points:
+                                    try:
+                                        if isinstance(point, list) and len(point) >= 2:
+                                            value = float(point[1])
+                                        elif hasattr(point, '__iter__'):
+                                            # Handle Point objects
+                                            point_list = eval(repr(point)) if hasattr(point, '__repr__') else list(point)
+                                            value = float(point_list[1]) if len(point_list) >= 2 else 0
+                                        else:
+                                            value = float(point)
+                                        
+                                        if value > 0:  # Only count positive costs
+                                            total_cost += value
+                                            valid_points += 1
+                                    except (ValueError, IndexError, TypeError):
+                                        continue
+                                
+                                if total_cost > 0:
+                                    trigger_costs.append((trigger_name, total_cost, valid_points))
+                        
+                        if trigger_costs:
+                            # Sort by cost (highest first)
+                            trigger_costs.sort(key=lambda x: x[1], reverse=True)
+                            
+                            output += f"📊 **TOP TRIGGERS BY COST**:\n"
+                            total_all = sum(cost for _, cost, _ in trigger_costs)
+                            
+                            for i, (trigger, cost, points) in enumerate(trigger_costs[:15], 1):
+                                percentage = (cost / total_all * 100) if total_all > 0 else 0
+                                output += f"   {i:2d}. **{trigger}**: ${cost:.2f} ({percentage:.1f}%) [{points} points]\n"
+                            
+                            if len(trigger_costs) > 15:
+                                output += f"   ... and {len(trigger_costs) - 15} more triggers\n"
+                            
+                            output += f"\n💰 **TOTAL COST**: ${total_all:.2f}\n"
+                            output += f"🎯 **WORKING QUERY**: `{query}`\n\n"
+                            
+                            found_data = True
+                            break  # Found working query, stop testing others
+                        
+                    else:
+                        output += f"   ❌ No data\n"
+                        
+                except Exception as e:
+                    output += f"   ❌ Error: {str(e)[:50]}...\n"
+            
+            if not found_data:
+                output += "\n❌ **No trigger-level cost data found**\n"
+                output += "The dashboard may be using:\n"
+                output += "1. Calculated fields not available via API\n"
+                output += "2. Custom metrics with different naming\n"
+                output += "3. Data processing that aggregates from logs\n"
+                output += "4. Template variables that modify the queries\n\n"
+                
+                # Fallback: try to get any service metrics
+                output += f"🔄 **Fallback: Available {service} metrics**\n"
+                try:
+                    fallback_query = f"sum:{service}.*{{{org_filter}}}"
+                    result = await metrics_client.query_metrics(
+                        query=fallback_query,
+                        start_time=int(start_time.timestamp()),
+                        end_time=int(end_time.timestamp())
+                    )
+                    
+                    if result and 'series' in result:
+                        metrics_found = set()
+                        for series in result['series']:
+                            metric_name = series.get('metric', 'unknown')
+                            metrics_found.add(metric_name)
+                        
+                        output += f"Found {len(metrics_found)} {service} metrics:\n"
+                        for metric in sorted(metrics_found):
+                            output += f"   - {metric}\n"
+                    
+                except Exception as e:
+                    output += f"Fallback failed: {e}\n"
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"{service} trigger cost query failed: {e}", "datadog")
+            import traceback
+            return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"

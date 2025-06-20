@@ -485,6 +485,8 @@ Before submitting code:
 - [ ] **New**: Use start.py for all setup and operational tasks
 - [ ] **Critical**: All DataDog API calls implement SSL certificate workaround pattern
 - [ ] **Critical**: SSL verification fallback tested in corporate environments
+- [ ] **MANDATORY**: Test all code changes before claiming they work - create verification scripts and run them
+- [ ] **MANDATORY**: Avoid hardcoded company-specific values (like 'organization:b38uat') - make everything generic
 
 ## Getting Help
 
