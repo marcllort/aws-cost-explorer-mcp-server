@@ -3298,7 +3298,10 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
                                         # Handle different point formats safely
                                         value = None
                                         
-                                        if isinstance(point, (list, tuple)) and len(point) >= 2:
+                                        if isinstance(point, dict):
+                                            # Dictionary format: {'timestamp': ..., 'value': ...}
+                                            value = float(point.get('value', 0))
+                                        elif isinstance(point, (list, tuple)) and len(point) >= 2:
                                             # Standard [timestamp, value] format
                                             value = float(point[1])
                                         elif hasattr(point, '__getitem__'):
@@ -3420,5 +3423,263 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             
         except Exception as e:
             logger.error(f"{service} trigger cost query failed: {e}", "datadog")
+            import traceback
+            return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+
+    @mcp.tool()
+    async def datadog_dashboard_universal_analyzer(
+        dashboard_id: str,
+        widget_filter: Optional[str] = None,
+        time_range: str = "24h",
+        organization_filter: Optional[str] = None,
+        max_results: int = 20
+    ) -> str:
+        """DataDog Universal Dashboard Analyzer: Generic pipeline to extract queries from any dashboard widget and execute them.
+        
+        This is the flexible, generic tool that:
+        1. Gets dashboard structure
+        2. Extracts widgets (all or filtered by name)
+        3. Finds actual queries within widgets
+        4. Executes those queries
+        5. Returns formatted results
+        
+        Works with ANY dashboard structure, not specific to any company or use case.
+        
+        Args:
+            dashboard_id: DataDog dashboard ID
+            widget_filter: Optional widget title filter (partial match)
+            time_range: Time range (1h, 24h, 7d, 30d)
+            organization_filter: Optional organization filter to apply to queries
+            max_results: Maximum number of results to show per query
+        """
+        logger.info(f"🔍 Universal analysis of dashboard {dashboard_id}...")
+        
+        try:
+            output = f"🌐 **UNIVERSAL DASHBOARD ANALYZER**\n\n"
+            output += f"📊 **Dashboard ID**: {dashboard_id}\n"
+            output += f"🎯 **Widget Filter**: {widget_filter or 'All widgets'}\n"
+            output += f"⏰ **Time Range**: {time_range}\n"
+            output += f"🏢 **Organization Filter**: {organization_filter or 'None'}\n\n"
+            
+            # Step 1: Get dashboard structure
+            dashboards_client = datadog_provider.get_client("dashboards")
+            dashboard = await dashboards_client.get_dashboard(dashboard_id)
+            
+            output += f"✅ **Dashboard**: {dashboard.get('title', 'Untitled')}\n"
+            widgets = dashboard.get('widgets', [])
+            output += f"📈 **Total Widgets**: {len(widgets)}\n\n"
+            
+            # Step 2: Extract template variables for query modification
+            template_vars = dashboard.get('template_variables', [])
+            template_substitutions = {}
+            
+            if template_vars:
+                output += f"🔧 **Template Variables Found**:\n"
+                for var in template_vars:
+                    var_name = var.get('name', '')
+                    var_default = var.get('default', '*')
+                    template_substitutions[var_name] = organization_filter if organization_filter and 'org' in var_name.lower() else var_default
+                    output += f"   - {var_name}: {template_substitutions[var_name]}\n"
+                output += "\n"
+            
+            # Step 3: Process widgets
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Convert time range
+            time_hours = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}.get(time_range, 24)
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(hours=time_hours)
+            
+            total_queries_found = 0
+            total_queries_executed = 0
+            total_results_found = 0
+            
+            for widget_idx, widget in enumerate(widgets):
+                widget_def = widget.get('definition', {})
+                widget_title = widget_def.get('title', f'Widget {widget_idx}')
+                widget_type = str(widget_def.get('type', 'unknown'))
+                
+                # Apply widget filter if specified
+                if widget_filter and widget_filter.lower() not in widget_title.lower():
+                    continue
+                
+                output += f"## **Widget {widget_idx}: {widget_title}**\n"
+                output += f"📊 **Type**: {widget_type}\n"
+                
+                # Step 4: Extract queries from widget
+                queries_found = []
+                
+                # Handle different widget types
+                if widget_type == 'group':
+                    # Group widgets might have nested widgets
+                    nested_widgets = widget_def.get('widgets', [])
+                    if nested_widgets:
+                        output += f"📦 **Group with {len(nested_widgets)} nested widgets**\n"
+                        for nested_idx, nested_widget in enumerate(nested_widgets):
+                            nested_def = nested_widget.get('definition', {})
+                            nested_requests = nested_def.get('requests', [])
+                            for req in nested_requests:
+                                query = req.get('q', req.get('query', ''))
+                                if query:
+                                    queries_found.append(f"nested[{nested_idx}]: {query}")
+                    else:
+                        output += f"📦 **Empty group widget - reconstructing likely queries**\n"
+                        # Try to infer queries based on widget title
+                        if any(keyword in widget_title.lower() for keyword in ['cost', 'trigger', 'expense']):
+                            service_name = 'carma' if 'carma' in widget_title.lower() else 'unknown'
+                            # Generate likely queries
+                            inferred_queries = [
+                                f"sum:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                                f"sum:{service_name}.trigger.cost{{*}} by {{organization}}",
+                                f"avg:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                            ]
+                            for query in inferred_queries:
+                                queries_found.append(f"inferred: {query}")
+                
+                else:
+                    # Regular widgets
+                    requests = widget_def.get('requests', [])
+                    if requests:
+                        output += f"📋 **Found {len(requests)} requests**\n"
+                        for req_idx, request in enumerate(requests):
+                            query = request.get('q', request.get('query', ''))
+                            if query:
+                                queries_found.append(f"request[{req_idx}]: {query}")
+                    else:
+                        output += f"📭 **No requests found**\n"
+                
+                total_queries_found += len(queries_found)
+                
+                if not queries_found:
+                    output += f"   ❌ No queries found\n\n"
+                    continue
+                
+                # Step 5: Execute queries and format results
+                output += f"🔍 **Found {len(queries_found)} queries:**\n"
+                
+                for query_info in queries_found:
+                    query_source, query = query_info.split(': ', 1)
+                    output += f"\n🎯 **Query** ({query_source}): `{query}`\n"
+                    
+                    try:
+                        # Apply template variable substitutions
+                        modified_query = query
+                        for var_name, var_value in template_substitutions.items():
+                            modified_query = modified_query.replace(f'${var_name}', var_value)
+                            modified_query = modified_query.replace(f'{{{var_name}}}', var_value)
+                        
+                        # Apply organization filter if specified and not already in query
+                        if organization_filter and 'organization:' not in modified_query:
+                            # Add organization filter to query
+                            if '{*}' in modified_query:
+                                modified_query = modified_query.replace('{*}', f'{{organization:{organization_filter}}}')
+                            elif '{' in modified_query and '}' in modified_query:
+                                # Add to existing filter
+                                bracket_start = modified_query.find('{')
+                                bracket_end = modified_query.find('}', bracket_start)
+                                existing_filter = modified_query[bracket_start+1:bracket_end]
+                                if existing_filter == '*':
+                                    new_filter = f'organization:{organization_filter}'
+                                else:
+                                    new_filter = f'{existing_filter},organization:{organization_filter}'
+                                modified_query = modified_query[:bracket_start+1] + new_filter + modified_query[bracket_end:]
+                        
+                        if modified_query != query:
+                            output += f"   📝 **Modified**: `{modified_query}`\n"
+                        
+                        # Execute query
+                        result = await metrics_client.query_metrics(
+                            query=modified_query,
+                            start_time=int(start_time.timestamp()),
+                            end_time=int(end_time.timestamp())
+                        )
+                        
+                        total_queries_executed += 1
+                        
+                        if result and 'series' in result and result['series']:
+                            series_count = len(result['series'])
+                            output += f"   ✅ **{series_count} series found**\n"
+                            
+                            # Parse and display results
+                            parsed_results = []
+                            
+                            for series in result['series'][:max_results]:
+                                scope = series.get('scope', '')
+                                points = series.get('points', [])
+                                metric_name = series.get('metric', 'unknown')
+                                
+                                if points:
+                                    total_value = 0
+                                    point_count = 0
+                                    
+                                    for point in points:
+                                        try:
+                                            if isinstance(point, dict):
+                                                value = float(point.get('value', 0))
+                                            elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                                                value = float(point[1])
+                                            else:
+                                                value = float(point)
+                                            
+                                            total_value += value
+                                            point_count += 1
+                                        except (ValueError, TypeError):
+                                            continue
+                                    
+                                    if total_value >= 0:
+                                        # Extract key from scope for grouping
+                                        group_key = "unknown"
+                                        if scope:
+                                            # Parse scope like "trigger:name" or "organization:name"
+                                            for part in scope.split(','):
+                                                if ':' in part:
+                                                    key, value = part.split(':', 1)
+                                                    group_key = value.strip()
+                                                    break
+                                        
+                                        parsed_results.append((group_key, total_value, point_count))
+                            
+                            if parsed_results:
+                                # Sort by value (highest first)
+                                parsed_results.sort(key=lambda x: x[1], reverse=True)
+                                total_results_found += len(parsed_results)
+                                
+                                output += f"   📊 **Top Results**:\n"
+                                for i, (name, value, points) in enumerate(parsed_results[:max_results], 1):
+                                    output += f"      {i:2d}. **{name}**: ${value:.2f} [{points} points]\n"
+                                
+                                if len(parsed_results) > max_results:
+                                    output += f"      ... and {len(parsed_results) - max_results} more\n"
+                                
+                                # Highlight top result
+                                if parsed_results:
+                                    top_name, top_value, _ = parsed_results[0]
+                                    output += f"   🏆 **TOP RESULT**: {top_name} (${top_value:.2f})\n"
+                        else:
+                            output += f"   ❌ No data returned\n"
+                        
+                    except Exception as query_error:
+                        output += f"   ❌ Query failed: {str(query_error)[:80]}...\n"
+                
+                output += "\n"
+            
+            # Summary
+            output += f"📋 **ANALYSIS SUMMARY**:\n"
+            output += f"   🔍 Queries found: {total_queries_found}\n"
+            output += f"   ✅ Queries executed: {total_queries_executed}\n"
+            output += f"   📊 Results found: {total_results_found}\n"
+            
+            if total_results_found == 0:
+                output += f"\n💡 **Troubleshooting Tips**:\n"
+                output += f"   • Try different widget_filter values\n"
+                output += f"   • Check if organization_filter matches your data\n"
+                output += f"   • Verify dashboard contains metric widgets\n"
+                output += f"   • Some dashboards use log-based widgets (not supported)\n"
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Universal dashboard analysis failed: {e}", "datadog")
             import traceback
             return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
