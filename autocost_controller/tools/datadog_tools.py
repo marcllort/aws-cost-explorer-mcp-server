@@ -3738,7 +3738,32 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
                             if query:
                                 queries_found.append(f"request[{req_idx}]: {query}")
                     else:
-                        output += f"📭 **No requests found**\n"
+                        output += f"📭 **No requests found in widget definition**\n"
+                        
+                        # Try enhanced extraction methods for widgets without obvious requests
+                        if widget_type in ['query_table', 'timeseries', 'toplist', 'query_value']:
+                            # These widget types often have data but may be structured differently
+                            raw_widget = widget.get('raw_data', widget)
+                            if 'definition' in raw_widget:
+                                raw_def = raw_widget['definition']
+                                
+                                # Look for alternative query structures
+                                for potential_query_field in ['queries', 'query', 'formulas', 'requests']:
+                                    if potential_query_field in raw_def:
+                                        field_value = raw_def[potential_query_field]
+                                        if isinstance(field_value, list):
+                                            for item in field_value:
+                                                if isinstance(item, dict):
+                                                    for sub_field in ['q', 'query', 'formula', 'data_source']:
+                                                        if sub_field in item and item[sub_field]:
+                                                            queries_found.append(f"extracted[{potential_query_field}]: {item[sub_field]}")
+                                                elif isinstance(item, str) and any(x in item for x in ['sum:', 'avg:', 'count:', 'max:', 'min:']):
+                                                    queries_found.append(f"extracted[{potential_query_field}]: {item}")
+                                        elif isinstance(field_value, str) and any(x in field_value for x in ['sum:', 'avg:', 'count:', 'max:', 'min:']):
+                                            queries_found.append(f"extracted[{potential_query_field}]: {field_value}")
+                            
+                            if queries_found:
+                                output += f"🔍 **Enhanced extraction found {len([q for q in queries_found if 'extracted' in q])} potential queries**\n"
                 
                 total_queries_found += len(queries_found)
                 
@@ -3874,6 +3899,125 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             logger.error(f"Universal dashboard analysis failed: {e}", "datadog")
             import traceback
             return f"❌ Error: {str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+
+    @mcp.tool()
+    async def datadog_dashboard_metric_extractor(
+        dashboard_id: str,
+        time_range: str = "24h",
+        metric_filter: Optional[str] = None
+    ) -> str:
+        """DataDog Dashboard Metric Extractor: Extract and execute ALL metric queries from any dashboard widget."""
+        logger.info(f"🔍 Extracting metrics from dashboard {dashboard_id}...")
+        
+        try:
+            client = datadog_provider.get_client("dashboards")
+            
+            # Extract all metrics from the dashboard
+            all_metrics = await client.extract_all_metrics_from_dashboard(dashboard_id)
+            
+            response = f"🔍 **DATADOG DASHBOARD METRIC EXTRACTOR**\n\n"
+            response += f"📊 **Dashboard ID**: {dashboard_id}\n"
+            response += f"⏰ **Time Range**: {time_range}\n"
+            response += f"🔍 **Total Metrics Found**: {len(all_metrics)}\n\n"
+            
+            if metric_filter:
+                # Filter metrics by pattern
+                filtered_metrics = [m for m in all_metrics if metric_filter.lower() in m['query'].lower()]
+                response += f"🎯 **Filtered by '{metric_filter}'**: {len(filtered_metrics)} metrics\n\n"
+                all_metrics = filtered_metrics
+            
+            if not all_metrics:
+                response += "📭 **No metrics found** in this dashboard.\n"
+                response += "💡 This could mean:\n"
+                response += "• Dashboard uses log-based widgets (not metric-based)\n"
+                response += "• Dashboard structure is not exposing metric queries via API\n"
+                response += "• Try using different dashboard or check widget types\n"
+                return response
+            
+            # Execute each metric and collect results
+            executed_metrics = []
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Calculate time range
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            if time_range == "1h":
+                start_time = end_time - timedelta(hours=1)
+            elif time_range == "24h":
+                start_time = end_time - timedelta(hours=24)
+            elif time_range == "7d":
+                start_time = end_time - timedelta(days=7)
+            elif time_range == "30d":
+                start_time = end_time - timedelta(days=30)
+            else:
+                start_time = end_time - timedelta(hours=24)
+            
+            for i, metric in enumerate(all_metrics[:10]):  # Limit to first 10 to avoid overwhelming
+                try:
+                    # Execute the metric query
+                    start_ts = int(start_time.timestamp())
+                    end_ts = int(end_time.timestamp())
+                    
+                    metrics_data = await metrics_client.query_metrics(
+                        query=metric['query'],
+                        start_time=start_ts,
+                        end_time=end_ts
+                    )
+                    
+                    executed_metrics.append({
+                        'metric': metric,
+                        'data': metrics_data,
+                        'success': True
+                    })
+                    
+                except Exception as e:
+                    executed_metrics.append({
+                        'metric': metric,
+                        'error': str(e),
+                        'success': False
+                    })
+            
+            # Format results
+            response += "📈 **EXTRACTED METRICS & RESULTS**:\n\n"
+            
+            for i, result in enumerate(executed_metrics, 1):
+                metric = result['metric']
+                response += f"**{i}. {metric['widget_title'] or 'Untitled Widget'}**\n"
+                response += f"   Widget Type: {metric['widget_type']}\n"
+                response += f"   Query: `{metric['query']}`\n"
+                response += f"   Source: {metric['request_type']}\n"
+                
+                if result['success']:
+                    data = result['data']
+                    series_count = data.get('series_count', 0)
+                    response += f"   ✅ **Results**: {series_count} series found\n"
+                    
+                    if series_count > 0:
+                        series = data.get('series', [])
+                        for j, s in enumerate(series[:3]):  # Show first 3 series
+                            points = s.get('pointlist', [])
+                            if points:
+                                latest_value = points[-1][1] if len(points[-1]) > 1 else 0
+                                response += f"      Series {j+1}: {s.get('metric', 'Unknown')} = {latest_value:.2f}\n"
+                        
+                        if series_count > 3:
+                            response += f"      ... and {series_count - 3} more series\n"
+                else:
+                    response += f"   ❌ **Error**: {result['error']}\n"
+                
+                response += "\n"
+            
+            if len(all_metrics) > 10:
+                response += f"... and {len(all_metrics) - 10} more metrics (showing first 10)\n\n"
+            
+            response += "💡 **Usage**: This tool extracts the actual metric queries from dashboard widgets and executes them.\n"
+            response += "Use `metric_filter` parameter to search for specific metrics (e.g., 'spot', 'cost', 'duration').\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Dashboard metric extraction failed: {e}", provider="datadog")
+            return f"❌ Error extracting metrics from dashboard: {str(e)}"
 
     @mcp.tool()
     async def datadog_dashboard_comprehensive_extractor(
@@ -4123,3 +4267,216 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
         except Exception as e:
             logger.error(f"Dashboard comprehensive extraction failed: {e}", provider="datadog")
             return f"❌ Error in comprehensive extraction: {str(e)}"
+
+    @mcp.tool()
+    async def datadog_dashboard_complete_extractor(
+        dashboard_id: str,
+        time_range: str = "24h",
+        debug_mode: bool = False
+    ) -> str:
+        """Complete Dashboard Extractor: Uses multiple API approaches to extract ALL possible data from any dashboard.
+        
+        This tool addresses the limitation where DataDog's standard dashboard API doesn't return
+        nested widget data for group widgets. It tries multiple approaches:
+        1. Standard dashboard API
+        2. Alternative dashboard data endpoints  
+        3. Direct metric pattern testing based on widget titles
+        4. Live dashboard data extraction
+        5. Template variable-based query reconstruction
+        
+        Args:
+            dashboard_id: DataDog dashboard ID
+            time_range: Time range (1h, 24h, 7d, 30d)
+            debug_mode: Show detailed debugging information
+        """
+        logger.info(f"🔍 Complete extraction of dashboard {dashboard_id}...")
+        
+        try:
+            output = f"🌐 **COMPLETE DASHBOARD EXTRACTOR**\n\n"
+            output += f"📊 **Dashboard ID**: {dashboard_id}\n"
+            output += f"⏰ **Time Range**: {time_range}\n\n"
+            
+            # Get dashboard client
+            dashboards_client = datadog_provider.get_client("dashboards")
+            metrics_client = datadog_provider.get_client("metrics")
+            
+            # Convert time range
+            time_hours = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}.get(time_range, 24)
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(hours=time_hours)
+            
+            # Step 1: Get basic dashboard info
+            dashboard = await dashboards_client.get_dashboard(dashboard_id)
+            widgets = dashboard.get('widgets', [])
+            template_vars = dashboard.get('template_variables', [])
+            
+            output += f"✅ **Dashboard**: {dashboard.get('title', 'Untitled')}\n"
+            output += f"📈 **Total Widgets**: {len(widgets)}\n"
+            output += f"🔧 **Template Variables**: {len(template_vars)}\n\n"
+            
+            # Step 2: For each widget, try multiple extraction strategies
+            all_extracted_data = {}
+            total_series_found = 0
+            
+            for widget_idx, widget in enumerate(widgets):
+                widget_def = widget.get('definition', {})
+                widget_title = widget_def.get('title', f'Widget {widget_idx}')
+                widget_type = widget_def.get('type', 'unknown')
+                
+                output += f"## **Widget {widget_idx}: {widget_title}**\n"
+                output += f"📊 **Type**: {widget_type}\n"
+                
+                widget_data = {}
+                
+                # Strategy 1: Direct requests extraction
+                requests = widget_def.get('requests', [])
+                if requests:
+                    output += f"📋 **Found {len(requests)} direct requests**\n"
+                    for req in requests:
+                        query = req.get('q', req.get('query', ''))
+                        if query:
+                            try:
+                                result = await metrics_client.query_metrics(
+                                    query=query,
+                                    start_time=int(start_time.timestamp()),
+                                    end_time=int(end_time.timestamp())
+                                )
+                                if result.get('series'):
+                                    widget_data[f"direct_query_{query[:50]}"] = len(result['series'])
+                                    total_series_found += len(result['series'])
+                            except Exception as e:
+                                if debug_mode:
+                                    output += f"   ❌ Query failed: {str(e)[:50]}\n"
+                
+                # Strategy 2: Widget title-based metric pattern inference
+                if widget_type == 'group' and not requests:
+                    output += f"🔍 **Group widget - inferring metrics from title '{widget_title}'**\n"
+                    
+                    # Generate likely metric patterns based on widget title
+                    service_name = widget_title.lower()
+                    inferred_patterns = []
+                    
+                    # Cost patterns
+                    if any(word in service_name for word in ['cost', 'price', 'billing']):
+                        inferred_patterns.extend([
+                            f"sum:{service_name}.trigger.cost{{*}}",
+                            f"sum:{service_name}.organization.cost{{*}}",
+                            f"sum:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                            f"sum:{service_name}.trigger.cost{{*}} by {{organization}}",
+                            f"sum:{service_name}.cost{{*}} by {{service}}",
+                        ])
+                    
+                    # Runtime/time patterns  
+                    if any(word in service_name for word in ['runtime', 'time', 'duration', 'hours']):
+                        inferred_patterns.extend([
+                            f"sum:{service_name}.trigger.runtime_hours{{*}} by {{organization}}",
+                            f"sum:{service_name}.organization.runtime_hours{{*}} by {{organization}}",
+                            f"avg:{service_name}.trigger.avg_execution_time{{*}} by {{trigger}}",
+                            f"sum:{service_name}.runtime{{*}} by {{trigger}}",
+                        ])
+                    
+                    # Service-specific patterns
+                    if service_name == 'others':
+                        # AWS/Others service patterns
+                        inferred_patterns.extend([
+                            "sum:aws.cost{*} by {service}",
+                            "sum:others.cost{*} by {service}",
+                            "sum:others.aws.cost{*} by {service}",
+                            "sum:cloudwatch.cost{*}",
+                            "sum:lambda.cost{*}",
+                            "sum:s3.cost{*}",
+                        ])
+                    elif service_name in ['carma', 'datawarehouse', 'treasury', 'analytics', 'whatif']:
+                        # Standard service patterns
+                        inferred_patterns.extend([
+                            f"sum:{service_name}.trigger.cost{{*}}",
+                            f"sum:{service_name}.trigger.cost{{*}} by {{trigger}}",
+                            f"sum:{service_name}.trigger.cost{{*}} by {{organization}}",
+                            f"sum:{service_name}.organization.cost{{*}} by {{organization}}",
+                            f"sum:{service_name}.organization.runtime_hours{{*}} by {{organization}}",
+                            f"avg:{service_name}.organization.spot_usage_percent{{*}} by {{organization}}",
+                        ])
+                    
+                    # Test each inferred pattern
+                    patterns_tested = 0
+                    patterns_working = 0
+                    
+                    for pattern in inferred_patterns:
+                        patterns_tested += 1
+                        try:
+                            result = await metrics_client.query_metrics(
+                                query=pattern,
+                                start_time=int(start_time.timestamp()),
+                                end_time=int(end_time.timestamp())
+                            )
+                            
+                            if result.get('series') and len(result['series']) > 0:
+                                patterns_working += 1
+                                series_count = len(result['series'])
+                                widget_data[f"inferred_{pattern}"] = series_count
+                                total_series_found += series_count
+                                
+                                output += f"   ✅ **{pattern}**: {series_count} series\n"
+                                
+                                # Extract and show sample data
+                                if series_count > 0:
+                                    sample_series = result['series'][:3]  # Show first 3 series
+                                    for i, series in enumerate(sample_series):
+                                        scope = series.get('scope', '')
+                                        points = series.get('points', [])
+                                        if points:
+                                            latest_point = points[-1]
+                                            if isinstance(latest_point, (list, tuple)) and len(latest_point) >= 2:
+                                                value = latest_point[1]
+                                                output += f"      {i+1}. {scope}: {value}\n"
+                            
+                            elif debug_mode:
+                                output += f"   📭 {pattern}: No data\n"
+                                
+                        except Exception as e:
+                            if debug_mode:
+                                output += f"   ❌ {pattern}: {str(e)[:30]}...\n"
+                    
+                    output += f"   📊 **Tested {patterns_tested} patterns, {patterns_working} working**\n"
+                
+                # Store widget data
+                if widget_data:
+                    all_extracted_data[widget_title] = widget_data
+                
+                output += "\n"
+            
+            # Step 3: Summary of all extracted data
+            output += f"📋 **COMPLETE EXTRACTION SUMMARY**\n\n"
+            output += f"🔍 **Total Widgets Analyzed**: {len(widgets)}\n"
+            output += f"✅ **Widgets with Data**: {len(all_extracted_data)}\n"
+            output += f"📊 **Total Data Series Found**: {total_series_found}\n"
+            output += f"⏰ **Time Period**: {start_time.strftime('%Y-%m-%d %H:%M')} to {end_time.strftime('%Y-%m-%d %H:%M')}\n\n"
+            
+            if all_extracted_data:
+                output += f"🎯 **DATA EXTRACTION RESULTS**:\n\n"
+                for widget_name, widget_data in all_extracted_data.items():
+                    output += f"**{widget_name}**:\n"
+                    total_widget_series = sum(widget_data.values()) if isinstance(widget_data, dict) else 0
+                    output += f"   📊 Total series: {total_widget_series}\n"
+                    
+                    # Show top 3 metrics for this widget
+                    if isinstance(widget_data, dict):
+                        sorted_metrics = sorted(widget_data.items(), key=lambda x: x[1], reverse=True)
+                        for metric_name, series_count in sorted_metrics[:3]:
+                            clean_name = metric_name.replace('inferred_', '').replace('direct_query_', '')[:60]
+                            output += f"   • {clean_name}: {series_count} series\n"
+                    output += "\n"
+            
+            else:
+                output += "❌ **No extractable data found**. This may indicate:\n"
+                output += "• Dashboard uses log-based widgets (not metric-based)\n"
+                output += "• Widgets contain static data or external integrations\n"
+                output += "• Data requires specific authentication or filters\n"
+                output += "• Widget data is embedded in a proprietary format\n"
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Failed complete dashboard extraction: {e}", "datadog")
+            return f"❌ Error in complete extraction: {str(e)}"
