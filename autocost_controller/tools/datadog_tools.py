@@ -3199,7 +3199,8 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
     async def datadog_trigger_cost_analysis(
         service: str = "carma",
         time_range: str = "24h",
-        organization: Optional[str] = None
+        organization: Optional[str] = None,
+        debug_mode: bool = False
     ) -> str:
         """DataDog Trigger Cost Analysis: Direct query for individual trigger cost breakdown for any service.
         
@@ -3207,6 +3208,7 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
             service: Service name (e.g., carma, lambda, etc.)
             time_range: Time range (1h, 24h, 7d, 30d)
             organization: Optional organization filter
+            debug_mode: Show detailed debugging information
         """
         logger.info(f"🔍 Querying {service} trigger costs for {organization or 'all'} over {time_range}...")
         
@@ -3264,12 +3266,18 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
                         
                         # Extract trigger costs
                         trigger_costs = []
+                        errors_count = 0
+                        processed_count = 0
                         
                         for series in result['series']:
-                            scope = series.get('scope', '')
-                            points = series.get('points', [])
-                            
-                            if points:
+                            processed_count += 1
+                            try:
+                                scope = series.get('scope', '')
+                                points = series.get('points', [])
+                                
+                                if not points:
+                                    continue
+                                
                                 # Get the trigger name from scope
                                 trigger_name = "unknown"
                                 if scope:
@@ -3281,48 +3289,95 @@ def register_datadog_tools(mcp: FastMCP, provider_manager: ProviderManager, conf
                                                 trigger_name = value.strip()
                                                 break
                                 
-                                # Calculate total cost from points
+                                # Calculate total cost from points - SAFER parsing
                                 total_cost = 0
                                 valid_points = 0
+                                
                                 for point in points:
                                     try:
-                                        if isinstance(point, list) and len(point) >= 2:
+                                        # Handle different point formats safely
+                                        value = None
+                                        
+                                        if isinstance(point, (list, tuple)) and len(point) >= 2:
+                                            # Standard [timestamp, value] format
                                             value = float(point[1])
-                                        elif hasattr(point, '__iter__'):
-                                            # Handle Point objects
-                                            point_list = eval(repr(point)) if hasattr(point, '__repr__') else list(point)
-                                            value = float(point_list[1]) if len(point_list) >= 2 else 0
-                                        else:
+                                        elif hasattr(point, '__getitem__'):
+                                            # Try to access as indexable object
+                                            try:
+                                                value = float(point[1])
+                                            except (IndexError, TypeError):
+                                                # Try to convert to string and parse
+                                                point_str = str(point)
+                                                if '[' in point_str and ']' in point_str:
+                                                    # Parse string representation like "[timestamp, value]"
+                                                    import ast
+                                                    try:
+                                                        parsed = ast.literal_eval(point_str)
+                                                        if isinstance(parsed, (list, tuple)) and len(parsed) >= 2:
+                                                            value = float(parsed[1])
+                                                    except (ValueError, SyntaxError):
+                                                        pass
+                                        elif isinstance(point, (int, float)):
+                                            # Direct numeric value
                                             value = float(point)
                                         
-                                        if value > 0:  # Only count positive costs
+                                        if value is not None and value >= 0:  # Accept zero costs too
                                             total_cost += value
                                             valid_points += 1
-                                    except (ValueError, IndexError, TypeError):
+                                            
+                                    except (ValueError, TypeError, AttributeError) as point_error:
+                                        # Log individual point errors but continue
                                         continue
                                 
-                                if total_cost > 0:
+                                if total_cost >= 0 and trigger_name != "unknown":  # Accept zero costs
                                     trigger_costs.append((trigger_name, total_cost, valid_points))
+                                    
+                            except Exception as series_error:
+                                errors_count += 1
+                                # Continue processing other series
+                                continue
+                        
+                        output += f"   📊 **Processing Summary**: {processed_count} series processed, {errors_count} errors\n"
+                        
+                        # Debug mode: show sample data
+                        if debug_mode and processed_count > 0:
+                            output += f"   🐛 **DEBUG - Sample Series Data**:\n"
+                            sample_series = result['series'][:3]  # Show first 3 series
+                            for i, series in enumerate(sample_series):
+                                scope = series.get('scope', 'No scope')
+                                points = series.get('points', [])
+                                output += f"      Series {i+1}: scope='{scope}'\n"
+                                output += f"         Points count: {len(points)}\n"
+                                if points:
+                                    sample_point = points[0]
+                                    output += f"         Sample point: {type(sample_point).__name__} = {repr(sample_point)}\n"
+                                    if len(points) > 1:
+                                        last_point = points[-1]
+                                        output += f"         Last point: {type(last_point).__name__} = {repr(last_point)}\n"
                         
                         if trigger_costs:
                             # Sort by cost (highest first)
                             trigger_costs.sort(key=lambda x: x[1], reverse=True)
                             
+                            output += f"   ✅ **Successfully extracted {len(trigger_costs)} triggers with cost data!**\n\n"
                             output += f"📊 **TOP TRIGGERS BY COST**:\n"
                             total_all = sum(cost for _, cost, _ in trigger_costs)
                             
-                            for i, (trigger, cost, points) in enumerate(trigger_costs[:15], 1):
+                            for i, (trigger, cost, points) in enumerate(trigger_costs[:20], 1):  # Show top 20
                                 percentage = (cost / total_all * 100) if total_all > 0 else 0
                                 output += f"   {i:2d}. **{trigger}**: ${cost:.2f} ({percentage:.1f}%) [{points} points]\n"
                             
-                            if len(trigger_costs) > 15:
-                                output += f"   ... and {len(trigger_costs) - 15} more triggers\n"
+                            if len(trigger_costs) > 20:
+                                output += f"   ... and {len(trigger_costs) - 20} more triggers\n"
                             
                             output += f"\n💰 **TOTAL COST**: ${total_all:.2f}\n"
-                            output += f"🎯 **WORKING QUERY**: `{query}`\n\n"
+                            output += f"🎯 **WORKING QUERY**: `{query}`\n"
+                            output += f"🔥 **MOST EXPENSIVE TRIGGER**: {trigger_costs[0][0]} (${trigger_costs[0][1]:.2f})\n\n"
                             
                             found_data = True
                             break  # Found working query, stop testing others
+                        else:
+                            output += f"   ⚠️ **No valid triggers extracted** (processed {processed_count}, errors {errors_count})\n"
                         
                     else:
                         output += f"   ❌ No data\n"
